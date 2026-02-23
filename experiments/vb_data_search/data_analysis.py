@@ -11,17 +11,15 @@ Usage:
     python data_analysis.py --filter --animals <ids|all> --regions <areas> --units-required <counts> --phase <1|2>
 """
 
-import sys
 from pathlib import Path
 
 # Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import pandas as pd
 import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from src.data.data_handler import VBNDataHandler
+from typing import Dict, List, Optional
+from jepsyn.data.data_handler import VBNDataHandler
 
 
 # Reference: AllenSDK Visual Behavior Neuropixels metadata tables
