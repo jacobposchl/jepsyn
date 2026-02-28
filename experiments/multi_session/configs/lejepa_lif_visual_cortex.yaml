@@ -38,7 +38,7 @@ model_config:
 
 # Training config
 training_config:
-  epochs: 100
+  epochs: 50
   batch_size: 32
   lr: 1.0e-4
   weight_decay: 0.05
