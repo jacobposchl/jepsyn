@@ -7,7 +7,7 @@ a Spiking Neural Network Model
 import argparse
 import copy
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import torch
@@ -22,7 +22,7 @@ from jepsyn.utils import create_context_mask, update_ema, verify_config
 
 def load_and_prepare_data(
     config: Dict[str, Any],
-) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[int, Dict[int, int]]]:
+) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[int, Dict[int, int]], List[int]]:
     """
     Load the spike-window parquet, validate it, split by session, and return DataLoaders.
 
@@ -37,7 +37,7 @@ def load_and_prepare_data(
         config: Validated configuration dict (from verify_config).
 
     Returns:
-        (train_loader, val_loader, test_loader, session_unit_maps)
+        (train_loader, val_loader, test_loader, session_unit_maps, test_session_ids)
         session_unit_maps: {session_id: {raw_unit_id: 1-indexed contiguous idx}}
             Needed by the training function to size per-session embedding tables.
     """
@@ -135,7 +135,7 @@ def load_and_prepare_data(
         collate_fn=spike_collate_fn,
     )
 
-    return train_loader, val_loader, test_loader, session_unit_maps
+    return train_loader, val_loader, test_loader, session_unit_maps, sorted(test_sessions.tolist())
 
 
 
@@ -388,6 +388,131 @@ def distill_snn(
     pass
 
 
+def identify_units(
+    model: Dict[str, Any],
+    test_data: DataLoader,
+    test_session_ids: List[int],
+    config: Dict[str, Any],
+) -> None:
+    """
+    Unit identification (POYO-style): adapt test-session unit embeddings using the
+    self-supervised LeJEPA objective, with all shared weights frozen.
+
+    After LeJEPA pretraining the shared encoder weights have learned a general
+    "language" for neural population dynamics, but the unit embedding tables for
+    test sessions were never updated (they stayed at random init). This function
+    finds the right embedding vectors for test-session units by running the JEPA
+    loss on test data with only those embedding tables trainable.
+
+    No labels are needed — the self-supervised prediction objective is used as-is.
+
+    Modifies context_encoder and target_encoder unit embeddings in-place.
+    Call this between train_lejepa() and evaluate_model().
+
+    Args:
+        model            : {"context_encoder", "target_encoder", "predictor"}
+        test_data        : Test DataLoader (same one passed to evaluate_model)
+        test_session_ids : Session IDs that appear only in the test split
+        config           : Config dict; reads training_config.{unit_id_steps,
+                           unit_id_lr, mask_ratio, lambd, num_slices}
+    """
+    train_cfg  = config.get("training_config", {})
+    n_steps    = train_cfg.get("unit_id_steps", 200)
+    lr         = train_cfg.get("unit_id_lr", 1e-3)
+    mask_ratio = train_cfg.get("mask_ratio", 0.5)
+    lambd      = train_cfg.get("lambd", 0.05)
+    num_slices = train_cfg.get("num_slices", 256)
+
+    device          = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    context_encoder = model["context_encoder"].to(device)
+    target_encoder  = model["target_encoder"].to(device)
+    predictor       = model["predictor"].to(device)
+
+    # --- Freeze every parameter in all three modules ---
+    for m in (context_encoder, target_encoder, predictor):
+        for p in m.parameters():
+            p.requires_grad_(False)
+
+    # --- Unfreeze only the test-session unit embedding tables in context_encoder ---
+    params_to_optimize: List[torch.Tensor] = []
+    for sid in test_session_ids:
+        embed_table = context_encoder.encoder.unit_embeds[str(sid)]
+        for p in embed_table.parameters():
+            p.requires_grad_(True)
+            params_to_optimize.append(p)
+
+    if not params_to_optimize:
+        print("[Unit ID] No test-session unit embeddings found; skipping.")
+        return
+
+    optimizer = torch.optim.Adam(params_to_optimize, lr=lr)
+
+    context_encoder.train()
+    target_encoder.eval()
+    predictor.eval()
+
+    total_params = sum(p.numel() for p in params_to_optimize)
+    print(
+        f"\n[Unit ID] Adapting {len(test_session_ids)} test-session unit tables "
+        f"({total_params:,} params) for {n_steps} steps  lr={lr}"
+    )
+
+    step        = 0
+    global_step = 0
+
+    while step < n_steps:
+        for batch in test_data:
+            if step >= n_steps:
+                break
+
+            session_ids_t = batch["session_ids"].to(device)
+            unit_ids_t    = batch["unit_ids"].to(device)
+            time_ids_t    = batch["time_ids"].to(device)
+            attn_mask     = batch["attention_mask"].to(device)
+
+            ctx_mask = create_context_mask(attn_mask, mask_ratio)
+
+            # Target encoder: always frozen, no gradient needed
+            with torch.no_grad():
+                _, h_tgt = target_encoder(session_ids_t, unit_ids_t, time_ids_t, attn_mask)
+
+            # Context encoder: only unit embed params are trainable;
+            # gradients flow through frozen cross-attn/self-attn weights back to them.
+            Z_ctx, h_ctx = context_encoder(session_ids_t, unit_ids_t, time_ids_t, ctx_mask)
+            Z_pred       = predictor(Z_ctx)
+            h_pred       = Z_pred.mean(dim=1)
+
+            total_loss, pred_loss, _ = lejepa_loss(
+                h_ctx, h_tgt, h_pred, global_step, lambd, num_slices
+            )
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+
+            step        += 1
+            global_step += 1
+
+            if step % 50 == 0 or step == n_steps:
+                print(
+                    f"  step {step:3d}/{n_steps} | "
+                    f"loss={total_loss.item():.4f} | pred={pred_loss.item():.4f}"
+                )
+
+    # Sync adapted unit embeddings from context_encoder → target_encoder
+    print("  Syncing adapted unit embeds → target encoder...")
+    with torch.no_grad():
+        for sid in test_session_ids:
+            sid_str = str(sid)
+            src = context_encoder.encoder.unit_embeds[sid_str]
+            tgt = target_encoder.encoder.unit_embeds[sid_str]
+            for p_src, p_tgt in zip(src.parameters(), tgt.parameters()):
+                p_tgt.copy_(p_src)
+
+    context_encoder.eval()
+    print("[Unit ID] Done.\n")
+
+
 def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0.5) -> pd.DataFrame:
     """
     Evaluate a trained model on test data.
@@ -509,7 +634,7 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
             X     = StandardScaler().fit_transform(all_h)
             y_sid = LabelEncoder().fit_transform(all_sids)
             clf   = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced",
-                                       multi_class="multinomial", solver="lbfgs")
+                                       solver="lbfgs")
             n_folds  = min(5, int(np.bincount(y_sid).min()))   # can't have more folds than min class size
             n_folds  = max(n_folds, 2)
             cv       = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
@@ -710,7 +835,7 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print("Loading and Preparing Data")
-    train_data, val_data, test_data, unit_maps = load_and_prepare_data(config)
+    train_data, val_data, test_data, unit_maps, test_session_ids = load_and_prepare_data(config)
     print("Data loaded successfully")
 
     print("\n" + "=" * 60)
@@ -718,6 +843,10 @@ def main(config_path: Path) -> None:
     jepa_model, jepa_train_metrics = train_lejepa(config, train_data, val_data, unit_maps)
     save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
     print("LeJEPA training complete")
+
+    print("\n" + "=" * 60)
+    print("Unit Identification (adapting test-session unit embeddings)")
+    identify_units(jepa_model, test_data, test_session_ids, config)
 
     print("\n" + "=" * 60)
     print("Evaluating LeJEPA on Test Set")

@@ -143,7 +143,8 @@ def _build_session_windows(
 
     stim = session.stimulus_presentations
     active_stim = stim[stim["active"] == True].copy()
-    change_events = active_stim[active_stim["is_change"] == True].copy()
+    change_events    = active_stim[active_stim["is_change"] == True].copy()
+    nonchange_events = active_stim[active_stim["is_change"] == False].copy()
 
     if len(change_events) == 0:
         print(f"  No active image-change events in session {session_id}; skipping.")
@@ -176,46 +177,59 @@ def _build_session_windows(
 
     rows: List[Dict[str, Any]] = []
 
-    for event_idx in range(len(change_events)):
-        event_row = change_events.iloc[event_idx]
-        event_time_s = float(event_row["start_time"])
-        window_start_s = event_time_s
-        window_end_s = event_time_s + (window_size_ms / 1000.0)
+    def _extract_windows(events_df: pd.DataFrame) -> None:
+        nonlocal next_window_id
+        for event_idx in range(len(events_df)):
+            event_row = events_df.iloc[event_idx]
+            event_time_s = float(event_row["start_time"])
+            window_start_s = event_time_s
+            window_end_s = event_time_s + (window_size_ms / 1000.0)
 
-        window_data = spike_ts.slice(window_start_s, window_end_s, reset_origin=True)
+            window_data = spike_ts.slice(window_start_s, window_end_s, reset_origin=True)
 
-        window_start_ms = int(round(event_time_s * 1000.0))
-        window_end_ms = window_start_ms + int(window_size_ms)
+            window_start_ms = int(round(event_time_s * 1000.0))
+            window_end_ms = window_start_ms + int(window_size_ms)
 
-        rel_times_s = window_data.timestamps
-        events_times_ms = np.array(rel_times_s * 1000.0, dtype=np.float32)
-        events_units = np.array(window_data.unit_id, dtype=np.int32)
+            rel_times_s = window_data.timestamps
+            events_times_ms = np.array(rel_times_s * 1000.0, dtype=np.float32)
+            events_units = np.array(window_data.unit_id, dtype=np.int32)
 
-        stimulus = [
-            {
-                "time_ms": 0.0,
-                "image_name": event_row.get("image_name", None),
-                "stimulus_block": int(event_row.get("stimulus_block", 0)),
-                "is_change": bool(event_row.get("is_change", True)),
+            stimulus = [
+                {
+                    "time_ms": 0.0,
+                    "image_name": event_row.get("image_name", None),
+                    "stimulus_block": int(event_row.get("stimulus_block", 0)),
+                    "is_change": bool(event_row.get("is_change", False)),
+                }
+            ]
+
+            row = {
+                "session_id": int(session_id),
+                "window_id": int(next_window_id),
+                "window_start_ms": window_start_ms,
+                "window_end_ms": window_end_ms,
+                "events_units": events_units,
+                "events_times_ms": events_times_ms,
+                "stimulus": stimulus,
+                "behavior": [],
             }
-        ]
-        behavior: List[Dict[str, Any]] = []
+            rows.append(row)
+            next_window_id += 1
 
-        row = {
-            "session_id": int(session_id),
-            "window_id": int(next_window_id),
-            "window_start_ms": window_start_ms,
-            "window_end_ms": window_end_ms,
-            "events_units": events_units,
-            "events_times_ms": events_times_ms,
-            "stimulus": stimulus,
-            "behavior": behavior,
-        }
-        rows.append(row)
-        next_window_id += 1
+    _extract_windows(change_events)
 
+    # Match the number of non-change windows to change windows so classes are balanced.
+    # If there are more non-change events than change events, randomly sample to match.
+    n_change = len(change_events)
+    if len(nonchange_events) > n_change:
+        nonchange_events = nonchange_events.sample(n=n_change, random_state=42)
+    _extract_windows(nonchange_events)
+
+    n_change_rows    = len(change_events)
+    n_nonchange_rows = len(nonchange_events)
     print(
-        f"  Created {len(rows)} windows ({len(good_unit_ids)} units, window={window_size_ms} ms)."
+        f"  Created {len(rows)} windows ({len(good_unit_ids)} units, window={window_size_ms} ms) "
+        f"— {n_change_rows} change + {n_nonchange_rows} non-change."
     )
     return rows, next_window_id
 
