@@ -454,47 +454,76 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
     print(f"\n[{stage}] Evaluation Metrics:")
     print(results_df.mean(numeric_only=True).to_string())
 
-    # Linear probe: can is_change be decoded linearly from the frozen representations?
+    # Linear probe: can stimulus/session structure be decoded linearly from frozen representations?
     if stage == "LeJEPA" and "is_change" in results_df.columns:
         from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import cross_val_score
-        from sklearn.preprocessing import StandardScaler
+        from sklearn.model_selection import cross_val_score, StratifiedKFold
+        from sklearn.preprocessing import StandardScaler, LabelEncoder
 
         all_h      = np.vstack(results_df["h_ctx"].values)           # [N, D]
         all_change = np.concatenate(results_df["is_change"].values)  # [N] bool
         all_block  = np.concatenate(results_df["stim_block"].values) # [N] int
+        all_sids   = np.concatenate(results_df["session_ids"].values) # [N] int
 
-        # Primary probe: is_change among stimulus windows only
+        # Diagnostics: always print so we can see what's in the test set
         valid = all_block >= 0
+        print(f"\n[{stage}] Label diagnostics (test set):")
+        print(f"  Total windows       : {len(all_change)}")
+        print(f"  stim_block >= 0     : {int(valid.sum())}  (windows with a stimulus event)")
+        print(f"  stim_block == -1    : {int((all_block == -1).sum())}  (baseline / no stimulus event)")
+        print(f"  is_change=True      : {int(all_change.sum())}  (among all windows)")
+        print(f"  Unique sessions     : {len(np.unique(all_sids))}")
+
+        ran_probe = False
+
+        # --- Probe 1: is_change (requires both True/False among stimulus windows) ---
         if valid.sum() >= 10 and len(np.unique(all_change[valid])) >= 2:
             X = StandardScaler().fit_transform(all_h[valid])
             y = all_change[valid].astype(int)
             clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
             scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
             print(
-                f"\n[{stage}] Linear probe (is_change) — 5-fold balanced accuracy: "
-                f"{scores.mean():.3f} ± {scores.std():.3f}  (random baseline = 0.500)"
+                f"\n[{stage}] Probe 1 — is_change  |  5-fold balanced acc: "
+                f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = 0.500)"
             )
-        else:
-            # Fallback: stim_block presence (change event vs baseline window).
-            # Triggered when the dataset only attaches stimulus metadata to change events,
-            # making is_change always True for labeled windows. This proxy asks a coarser
-            # but still meaningful question: do representations distinguish change-event
-            # windows from baseline windows?
-            y_fallback = (all_block >= 0).astype(int)
-            if len(np.unique(y_fallback)) >= 2 and y_fallback.sum() >= 10:
-                X = StandardScaler().fit_transform(all_h)
-                clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-                scores = cross_val_score(clf, X, y_fallback, cv=5, scoring="balanced_accuracy")
+            ran_probe = True
+
+        # --- Probe 2: change-event window vs baseline (requires both stim_block classes) ---
+        y_stim = (all_block >= 0).astype(int)
+        if not ran_probe and len(np.unique(y_stim)) >= 2 and y_stim.sum() >= 10:
+            X = StandardScaler().fit_transform(all_h)
+            clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+            scores = cross_val_score(clf, X, y_stim, cv=5, scoring="balanced_accuracy")
+            print(
+                f"\n[{stage}] Probe 2 — change-event vs baseline  |  5-fold balanced acc: "
+                f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = 0.500)\n"
+                f"  (is_change had only 1 class — dataset only labels change events)"
+            )
+            ran_probe = True
+
+        # --- Probe 3: session identity — always available, confirms session geometry ---
+        # This is the guaranteed fallback: UMAP shows clear session clusters, so a well-
+        # trained encoder should decode session from the representation far above chance.
+        n_sessions = len(np.unique(all_sids))
+        if n_sessions >= 2:
+            X     = StandardScaler().fit_transform(all_h)
+            y_sid = LabelEncoder().fit_transform(all_sids)
+            clf   = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced",
+                                       multi_class="multinomial", solver="lbfgs")
+            n_folds  = min(5, int(np.bincount(y_sid).min()))   # can't have more folds than min class size
+            n_folds  = max(n_folds, 2)
+            cv       = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            scores   = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
+            chance   = 1.0 / n_sessions
+            print(
+                f"\n[{stage}] Probe 3 — session identity  |  {n_folds}-fold balanced acc: "
+                f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = {chance:.3f})"
+            )
+            if not ran_probe:
                 print(
-                    f"\n[{stage}] Linear probe (change event vs baseline) [fallback] — "
-                    f"5-fold balanced accuracy: {scores.mean():.3f} ± {scores.std():.3f}  "
-                    f"(random baseline = 0.500)\n"
-                    f"  Note: is_change had only 1 class — dataset likely only labels change events.\n"
-                    f"  Fix: ensure non-change trial windows also have stimulus metadata in the parquet."
+                    f"  (Probes 1 & 2 skipped — test sessions lack mixed stimulus labels.\n"
+                    f"   Fix: ensure non-change trial windows have stimulus metadata in the parquet.)"
                 )
-            else:
-                print(f"\n[{stage}] Linear probe skipped — insufficient label diversity in test set.")
 
     return results_df
     #when to try implementing RoPE?
