@@ -15,6 +15,7 @@ runs/
 datasets/
 .venv/
 .github/
+results/
 
 # macOS system files
 .DS_Store
