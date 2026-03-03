@@ -412,6 +412,211 @@ def train_lejepa(
     )
 
 
+def train_mae(
+    config: Dict[str, Any],
+    train_data: DataLoader,
+    val_data: DataLoader,
+    unit_maps: Dict[int, Dict[int, int]],
+) -> Tuple[Dict[str, Any], pd.DataFrame]:
+    """
+    Train a MAE (Masked Autoencoder) model on multi-session neural data.
+
+    Architecture:
+        encoder  (NeuralEncoder, same as LeJEPA context encoder)
+        decoder  (MAEDecoder: cross-attends over latents to reconstruct masked spike embeddings)
+
+    Loss:
+        MSE reconstruction loss at masked spike token positions only.
+
+    Unlike LeJEPA, there is no EMA target encoder or latent-space predictor.
+    The model learns by reconstructing original spike embeddings at masked positions.
+
+    Args:
+        config     : Validated config dict (from verify_config).
+        train_data : Training DataLoader.
+        val_data   : Validation DataLoader.
+        unit_maps  : {session_id: {raw_unit_id: 1-indexed idx}} from load_and_prepare_data.
+
+    Returns:
+        (model_bundle, metrics_df)
+        model_bundle: {"encoder", "decoder"}
+        metrics_df columns: epoch, train_loss, val_loss
+    """
+    from jepsyn.models import MAEDecoder
+
+    model_cfg = config.get("model_config", {})
+    train_cfg = config.get("training_config", {})
+
+    # Encoder hyperparameters (same as LeJEPA)
+    d_model = model_cfg.get("d_model", 256)
+    n_latents = model_cfg.get("n_latents", 64)
+    window_size_s = model_cfg.get("window_size_s", 0.4)
+    encoder_type = model_cfg.get("encoder_type", "perceiver")
+    encoder_kwargs = {
+        k: model_cfg[k]
+        for k in (
+            "n_cross_attn_heads",
+            "n_self_attn_layers",
+            "n_self_attn_heads",
+            "dim_feedforward",
+            "dropout",
+            "rope_t_min",
+            "rope_t_max",
+            "use_delimiter_tokens",
+        )
+        if k in model_cfg
+    }
+
+    # MAE decoder hyperparameters
+    mae_n_layers      = model_cfg.get("mae_decoder_n_layers", 2)
+    mae_n_heads       = model_cfg.get("mae_decoder_n_heads", 4)
+    mae_dim_ff        = model_cfg.get("mae_decoder_dim_feedforward", 512)
+    mae_dropout       = model_cfg.get("dropout", 0.1)
+
+    # Training hyperparameters
+    n_epochs     = train_cfg.get("epochs", 100)
+    lr           = train_cfg.get("lr", 1e-4)
+    weight_decay = train_cfg.get("weight_decay", 0.05)
+    mask_ratio   = train_cfg.get("mask_ratio", 0.75)
+    unit_dropout = train_cfg.get("unit_dropout", 0.0)
+    results_path = config.get("results_out_path")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training MAE on {device}")
+
+    # Encoder
+    encoder = NeuralEncoder(
+        session_unit_maps=unit_maps,
+        d_model=d_model,
+        n_latents=n_latents,
+        window_size_s=window_size_s,
+        encoder_type=encoder_type,
+        **encoder_kwargs,
+    ).to(device)
+
+    # MAE Decoder
+    decoder = MAEDecoder(
+        d_model=d_model,
+        n_heads=mae_n_heads,
+        n_layers=mae_n_layers,
+        dim_feedforward=mae_dim_ff,
+        dropout=mae_dropout,
+    ).to(device)
+
+    # Optimizer: both encoder and decoder are trained end-to-end
+    optimizer = torch.optim.AdamW(
+        list(encoder.parameters()) + list(decoder.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+
+    all_metrics = []
+
+    for epoch in range(n_epochs):
+        # ---- Training ----
+        encoder.train()
+        decoder.train()
+        train_loss_sum = 0.0
+        n_train = 0
+
+        for batch in train_data:
+            session_ids = batch["session_ids"].to(device)
+            unit_ids    = batch["unit_ids"].to(device)
+            time_ids    = batch["time_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
+
+            # Context mask: True = visible to encoder, False = masked
+            ctx_mask = create_context_mask(attn_mask, mask_ratio)
+
+            if unit_dropout > 0.0:
+                ctx_mask = apply_unit_dropout(unit_ids, ctx_mask, dropout_ratio=unit_dropout)
+
+            # Encoder sees only visible (unmasked) tokens
+            Z, _ = encoder(session_ids, unit_ids, time_ids, ctx_mask)
+
+            # Build reconstruction targets: original unit embeddings before masking.
+            # We need the raw unit embeddings — extract them from the encoder directly.
+            with torch.no_grad():
+                x_target = torch.zeros(
+                    session_ids.shape[0], unit_ids.shape[1], d_model,
+                    device=device, dtype=torch.float32,
+                )
+                for sid_val in session_ids.unique():
+                    sid_str = str(sid_val.item())
+                    mask    = (session_ids == sid_val)
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+
+            # Decoder reconstructs masked positions from latents Z
+            _, loss = decoder(Z, x_target, ctx_mask, attn_mask)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_loss_sum += loss.item()
+            n_train += 1
+
+        # ---- Validation ----
+        encoder.eval()
+        decoder.eval()
+        val_loss_sum = 0.0
+        n_val = 0
+
+        with torch.no_grad():
+            for batch in val_data:
+                session_ids = batch["session_ids"].to(device)
+                unit_ids    = batch["unit_ids"].to(device)
+                time_ids    = batch["time_ids"].to(device)
+                attn_mask   = batch["attention_mask"].to(device)
+
+                ctx_mask = create_context_mask(attn_mask, mask_ratio)
+                Z, _     = encoder(session_ids, unit_ids, time_ids, ctx_mask)
+
+                x_target = torch.zeros(
+                    session_ids.shape[0], unit_ids.shape[1], d_model,
+                    device=device, dtype=torch.float32,
+                )
+                for sid_val in session_ids.unique():
+                    sid_str = str(sid_val.item())
+                    mask    = (session_ids == sid_val)
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+
+                _, loss = decoder(Z, x_target, ctx_mask, attn_mask)
+                val_loss_sum += loss.item()
+                n_val += 1
+
+        train_loss_avg = train_loss_sum / max(n_train, 1)
+        val_loss_avg   = val_loss_sum   / max(n_val,   1)
+
+        all_metrics.append({
+            "epoch":      epoch,
+            "train_loss": train_loss_avg,
+            "val_loss":   val_loss_avg,
+        })
+
+        print(f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}")
+
+    # ---- Checkpoint ----
+    if results_path:
+        ckpt_dir  = Path(results_path)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / "mae_checkpoint.pt"
+        torch.save(
+            {
+                "encoder": encoder.state_dict(),
+                "decoder": decoder.state_dict(),
+                "config":  config,
+            },
+            ckpt_path,
+        )
+        print(f"Checkpoint saved to {ckpt_path}")
+
+    return (
+        {"encoder": encoder, "decoder": decoder},
+        pd.DataFrame(all_metrics),
+    )
+
+
 def distill_snn(
     config: Dict[str, Any], teacher_model: Any, train_data: Any, val_data: Any
 ) -> Tuple[Any, pd.DataFrame]:
@@ -978,46 +1183,80 @@ def main(config_path: Path) -> None:
     )
     print("Data loaded successfully")
 
-    print("\n" + "=" * 60)
-    print("Training LeJEPA Teacher Model")
-    jepa_model, jepa_train_metrics = train_lejepa(
-        config, train_data, val_data, unit_maps
-    )
-    save_results(
-        stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config
-    )
-    print("LeJEPA training complete")
+    # (for MAE ablation) Confirm which model to run based on reg_type in config 
+    reg_type = config.get("training_config", {}).get("reg_type", "sigreg").lower()
 
-    print("\n" + "=" * 60)
-    print("Unit Identification (adapting test-session unit embeddings)")
-    identify_units(jepa_model, test_data, test_session_ids, config)
-
-    print("\n" + "=" * 60)
-    print("Evaluating LeJEPA on Test Set")
-    _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
-    jepa_test_metrics = evaluate_model(
-        jepa_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
-    )
-    save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
-    print("LeJEPA evaluation complete")
-
-    print("\n" + "=" * 60)
-    print("Distilling into Spiking Neural Network")
-    snn_result = distill_snn(config, jepa_model, train_data, val_data)
-    if snn_result is not None:
-        snn_model, snn_train_metrics = snn_result
-        save_results(
-            stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config
+    if reg_type == "none":
+        print("\n" + "=" * 60)
+        print("Training MAE Ablation Model")
+        mae_model, mae_train_metrics = train_mae(
+            config, train_data, val_data, unit_maps
         )
-        print("SNN distillation complete")
+        save_results(
+            stage="MAE", phase="training", metrics=mae_train_metrics, config=config
+        )
+        print("MAE training complete")
 
         print("\n" + "=" * 60)
-        print("Evaluating Distilled SNN on Test Set")
-        snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
-        save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
-        print("SNN evaluation complete")
+        print("Unit Identification (adapting test-session unit embeddings)")
+        identify_units(mae_model, test_data, test_session_ids, config)
+
+        print("\n" + "=" * 60)
+        print("Evaluating MAE on Test Set")
+        _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.75)
+        mae_test_metrics = evaluate_model(
+            mae_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
+        )
+        save_results(stage="MAE", phase="test", metrics=mae_test_metrics, config=config)
+        print("MAE evaluation complete")
+
     else:
-        print("SNN distillation not yet implemented; skipping.")
+        stage_name = "VICReg" if reg_type == "vicreg" else "LeJEPA"
+    
+        print("\n" + "=" * 60)
+        # print("Training LeJEPA Teacher Model")
+        print(f"Training {stage_name} Model")
+        jepa_model, jepa_train_metrics = train_lejepa(
+            config, train_data, val_data, unit_maps
+        )
+        # save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
+        save_results(stage=stage_name, phase="training", metrics=jepa_train_metrics, config=config)
+        # print("LeJEPA training complete")
+        print(f"{stage_name} training complete")
+
+        print("\n" + "=" * 60)
+        print("Unit Identification (adapting test-session unit embeddings)")
+        identify_units(jepa_model, test_data, test_session_ids, config)
+
+        print("\n" + "=" * 60)
+        # print("Evaluating LeJEPA on Test Set")
+        print(f"Evaluating {stage_name} on Test Set")
+        _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
+        jepa_test_metrics = evaluate_model(
+            jepa_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
+        )
+        # save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
+        save_results(stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config)
+        # print("LeJEPA evaluation complete")
+        print(f"{stage_name} evaluation complete")
+
+        print("\n" + "=" * 60)
+        print("Distilling into Spiking Neural Network")
+        snn_result = distill_snn(config, jepa_model, train_data, val_data)
+        if snn_result is not None:
+            snn_model, snn_train_metrics = snn_result
+            save_results(
+                stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config
+            )
+            print("SNN distillation complete")
+
+            print("\n" + "=" * 60)
+            print("Evaluating Distilled SNN on Test Set")
+            snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
+            save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
+            print("SNN evaluation complete")
+        else:
+            print("SNN distillation not yet implemented; skipping.")
 
     print("\n" + "=" * 60)
     print("Multi-Session Experiment Complete!")
