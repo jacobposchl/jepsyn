@@ -19,3 +19,7 @@ results/
 
 # macOS system files
 .DS_Store
+<<<<<<< HEAD
+=======
+venv/
+>>>>>>> c29fe4a1f8ace9f17d55bf6a6ae2ead19c6d19c4
