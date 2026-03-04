@@ -10,5 +10,5 @@ __all__ = [
     "NeuralEncoder",
     "NeuralPredictor",
     "SNNEncoder",
+    "MAEDecoder",
 ]
-
