@@ -4,120 +4,80 @@ Latent space visualization utilities for analyzing learned representations.
 
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
-from typing import Optional
-from sklearn.decomposition import PCA
+from typing import Tuple
 
 
-def plot_latent_distribution(
-    embeddings: torch.Tensor,
-    ax: Optional[plt.Axes] = None,
-    title: str = "Latent Space Distribution"
-) -> plt.Axes:
+def plot_umap_by_session(
+    latent_vectors: np.ndarray,
+    session_labels: np.ndarray,
+    stage: str,
+) -> Tuple[plt.Figure, np.ndarray]:
     """
-    Plot histogram of latent representation values.
-    
+    2-D UMAP scatter coloured by session ID.
+
     Args:
-        embeddings: Tensor of shape (N, latent_dim)
-        ax: Matplotlib axes
-        title: Plot title
-        
+        latent_vectors: [N, D] float array of context representations.
+        session_labels: [N] int array of session IDs.
+        stage:          Experiment stage label for the title.
+
     Returns:
-        Matplotlib axes
+        (fig, embeddings2d) — figure and the [N, 2] UMAP coordinates.
+        embeddings2d is returned so the caller can reuse it for plot_umap_by_change
+        without running UMAP twice.
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-    
-    embeddings_np = embeddings.detach().cpu().numpy().flatten()
-    
-    ax.hist(embeddings_np, bins=50, alpha=0.7, edgecolor='black')
-    ax.axvline(x=0, color='red', linestyle='--', label='Zero')
-    
-    ax.set_xlabel('Embedding Value')
-    ax.set_ylabel('Frequency')
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    return ax
+    import umap
+
+    reducer = umap.UMAP(n_components=2, random_state=42)
+    embeddings2d = reducer.fit_transform(latent_vectors)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(
+        embeddings2d[:, 0], embeddings2d[:, 1],
+        c=session_labels, cmap="tab10", alpha=0.5, s=10,
+    )
+    plt.colorbar(scatter, ax=ax, label="Session ID")
+    ax.set_title(f"{stage} - Latent Space (UMAP)")
+    ax.set_xlabel("DIM 1")
+    ax.set_ylabel("DIM 2")
+    plt.tight_layout()
+    return fig, embeddings2d
 
 
-def plot_latent_dimensionality(
-    embeddings: torch.Tensor,
-    ax: Optional[plt.Axes] = None,
-    title: str = "Latent Space Dimensionality"
-) -> plt.Axes:
+def plot_umap_by_change(
+    embeddings2d: np.ndarray,
+    all_change: np.ndarray,
+    valid: np.ndarray,
+    stage: str,
+) -> plt.Figure:
     """
-    Plot PCA variance explained to assess effective dimensionality.
-    
+    2-D UMAP scatter coloured by change-detection label.
+
+    Reuses pre-computed 2D coordinates from plot_umap_by_session so UMAP
+    is only fitted once.
+
     Args:
-        embeddings: Tensor of shape (N, latent_dim)
-        ax: Matplotlib axes
-        title: Plot title
-        
-    Returns:
-        Matplotlib axes
-    """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-    
-    embeddings_np = embeddings.detach().cpu().numpy()
-    
-    pca = PCA()
-    pca.fit(embeddings_np)
-    
-    cumsum_variance = np.cumsum(pca.explained_variance_ratio_)
-    
-    ax.plot(range(1, len(cumsum_variance) + 1), cumsum_variance, 
-            marker='o', linewidth=2)
-    ax.axhline(y=0.95, color='red', linestyle='--', label='95% variance')
-    
-    ax.set_xlabel('Number of Components')
-    ax.set_ylabel('Cumulative Variance Explained')
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    return ax
+        embeddings2d: [N, 2] float array from a prior UMAP fit.
+        all_change:   [N] int array (1 = change, 0 = no change).
+        valid:        [N] bool array — True for stimulus windows.
+        stage:        Experiment stage label for the title.
 
-
-def plot_prediction_accuracy(
-    predicted: torch.Tensor,
-    target: torch.Tensor,
-    ax: Optional[plt.Axes] = None,
-    title: str = "Prediction Accuracy"
-) -> plt.Axes:
-    """
-    Plot cosine similarity between predicted and target embeddings.
-    
-    Args:
-        predicted: Predicted embeddings (N, latent_dim)
-        target: Target embeddings (N, latent_dim)
-        ax: Matplotlib axes
-        title: Plot title
-        
     Returns:
-        Matplotlib axes
+        Matplotlib figure.
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-    
-    pred_np = predicted.detach().cpu().numpy()
-    target_np = target.detach().cpu().numpy()
-    
-    similarities = []
-    for p, t in zip(pred_np, target_np):
-        cos_sim = np.dot(p, t) / (np.linalg.norm(p) * np.linalg.norm(t))
-        similarities.append(cos_sim)
-    
-    ax.hist(similarities, bins=50, alpha=0.7, edgecolor='black')
-    ax.axvline(x=np.mean(similarities), color='red', linestyle='--', 
-               label=f'Mean: {np.mean(similarities):.3f}')
-    
-    ax.set_xlabel('Cosine Similarity')
-    ax.set_ylabel('Frequency')
-    ax.set_title(title)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(
+        embeddings2d[~valid, 0], embeddings2d[~valid, 1],
+        c="lightgray", alpha=0.2, s=8, label="no stimulus",
+    )
+    for val, label, color in [(0, "no change", "steelblue"), (1, "change", "tomato")]:
+        mask = valid & (all_change == val)
+        ax.scatter(
+            embeddings2d[mask, 0], embeddings2d[mask, 1],
+            c=color, alpha=0.6, s=10, label=label,
+        )
     ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    return ax
+    ax.set_title(f"{stage} - Latent Space by Change Detection (UMAP)")
+    ax.set_xlabel("DIM 1")
+    ax.set_ylabel("DIM 2")
+    plt.tight_layout()
+    return fig

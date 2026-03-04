@@ -2,80 +2,82 @@
 Training visualization utilities for monitoring model training progress.
 """
 
-import numpy as np
 import matplotlib.pyplot as plt
-from typing import Optional, List, Tuple
+import pandas as pd
+from typing import Tuple
 
 
-def plot_loss_curves(
-    total_losses: List[float],
-    pred_losses: List[float],
-    sigreg_losses: List[float],
-    ax: Optional[plt.Axes] = None,
-    title: str = "Training Loss Curves"
-) -> plt.Axes:
+def plot_training_curves(
+    metrics: pd.DataFrame,
+    stage: str,
+) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Plot training loss curves over epochs.
-    
+    Plot train/val total loss and pred/reg loss breakdown.
+
     Args:
-        total_losses: Total loss per epoch
-        pred_losses: Prediction loss per epoch
-        sigreg_losses: SIGReg loss per epoch
-        ax: Matplotlib axes
-        title: Plot title
-        
+        metrics: DataFrame with columns epoch, train_loss, val_loss,
+                 and optionally train_pred_loss, train_reg_loss.
+        stage:   Experiment stage label (e.g. "LeJEPA", "VICReg").
+
     Returns:
-        Matplotlib axes
+        (fig, axes) — 1x2 figure.
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-    
-    epochs = range(len(total_losses))
-    
-    ax.plot(epochs, total_losses, label='Total Loss', linewidth=2)
-    ax.plot(epochs, pred_losses, label='Prediction Loss', linewidth=2)
-    ax.plot(epochs, sigreg_losses, label='SIGReg Loss', linewidth=2)
-    
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    return ax
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle(f"{stage} - Training Curves")
+
+    if "train_loss" in metrics.columns:
+        axes[0].plot(metrics["epoch"], metrics["train_loss"], label="train")
+        axes[0].plot(metrics["epoch"], metrics["val_loss"], label="val")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Loss")
+        axes[0].set_title("Total Loss")
+        axes[0].legend()
+
+    if "train_pred_loss" in metrics.columns:
+        axes[1].plot(metrics["epoch"], metrics["train_pred_loss"], label="pred loss")
+        axes[1].plot(metrics["epoch"], metrics["train_reg_loss"], label="reg loss")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Loss")
+        axes[1].set_title("Pred vs Reg Loss")
+        axes[1].legend()
+
+    return fig, axes
 
 
-def plot_loss_ratio(
-    pred_losses: List[float],
-    sigreg_losses: List[float],
-    ax: Optional[plt.Axes] = None,
-    title: str = "Prediction/SIGReg Loss Ratio"
-) -> plt.Axes:
+def plot_distillation_curves(
+    metrics: pd.DataFrame,
+    stage: str,
+) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Plot ratio of prediction loss to SIGReg loss over epochs.
-    
+    Plot distillation training curves (total loss, distill vs homeostatic loss).
+
     Args:
-        pred_losses: Prediction loss per epoch
-        sigreg_losses: SIGReg loss per epoch
-        ax: Matplotlib axes
-        title: Plot title
-        
+        metrics: DataFrame with columns epoch, train_loss, and optionally
+                 val_loss, distill_loss, homeo_loss.
+        stage:   Experiment stage label (e.g. "SNN").
+
     Returns:
-        Matplotlib axes
+        (fig, axes) — 1x2 figure.
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-    
-    epochs = range(len(pred_losses))
-    ratios = [p / s if s > 0 else 0 for p, s in zip(pred_losses, sigreg_losses)]
-    
-    ax.plot(epochs, ratios, linewidth=2, color='purple')
-    ax.axhline(y=1.0, color='red', linestyle='--', label='Equal contribution')
-    
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Prediction Loss / SIGReg Loss')
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    return ax
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle(f"{stage} - Distillation Curves")
+
+    if "train_loss" in metrics.columns:
+        axes[0].plot(metrics["epoch"], metrics["train_loss"], label="train")
+        if "val_loss" in metrics.columns:
+            axes[0].plot(metrics["epoch"], metrics["val_loss"], label="val")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Loss")
+        axes[0].set_title("Total Loss")
+        axes[0].legend()
+
+    if "distill_loss" in metrics.columns:
+        axes[1].plot(metrics["epoch"], metrics["distill_loss"], label="distill loss")
+        if "homeo_loss" in metrics.columns:
+            axes[1].plot(metrics["epoch"], metrics["homeo_loss"], label="homeostatic loss")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Loss")
+        axes[1].set_title("Distill vs Homeostatic Loss")
+        axes[1].legend()
+
+    return fig, axes

@@ -4,6 +4,7 @@ Model performance visualization utilities.
 
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 import torch
 from typing import Optional
 
@@ -123,5 +124,28 @@ def plot_mse_per_dimension(
     ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3, axis='y')
-    
+
     return ax
+
+
+def plot_test_metrics_bar(
+    metrics: pd.DataFrame,
+    stage: str,
+) -> plt.Figure:
+    """
+    Bar chart of mean pred_loss and cos_similarity over all test batches.
+
+    Args:
+        metrics: DataFrame with columns pred_loss and cos_similarity.
+        stage:   Experiment stage label for the title.
+
+    Returns:
+        Matplotlib figure.
+    """
+    fig, ax = plt.subplots(figsize=(6, 4))
+    mean_metrics = metrics[["pred_loss", "cos_similarity"]].mean()
+    ax.bar(mean_metrics.index, mean_metrics.values)
+    ax.set_ylabel("Value")
+    ax.set_title(f"{stage} - Mean Test Metrics")
+    plt.tight_layout()
+    return fig
