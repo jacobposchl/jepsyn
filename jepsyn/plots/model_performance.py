@@ -143,7 +143,7 @@ def plot_test_metrics_bar(
         Matplotlib figure.
     """
     fig, ax = plt.subplots(figsize=(6, 4))
-    cols = [c for c in ["pred_loss", "cos_similarity"] if c in metrics.columns]
+    cols = [c for c in ["pred_loss", "cos_similarity", "r2", "cka"] if c in metrics.columns]
     if not cols:
         ax.set_title(f"{stage} - No test metrics available")
         return fig

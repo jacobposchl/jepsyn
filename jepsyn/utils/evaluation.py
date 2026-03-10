@@ -38,6 +38,16 @@ def evaluate_model(
         predictor = model["predictor"].to(device).eval()
     all_metrics = []
 
+    def _cka(X: torch.Tensor, Y: torch.Tensor) -> float:
+        """Linear CKA between two [B, D] representation matrices."""
+        X = X - X.mean(0)
+        Y = Y - Y.mean(0)
+        XXT = X @ X.T
+        YYT = Y @ Y.T
+        numerator = (XXT * YYT).sum()
+        denominator = torch.sqrt((XXT * XXT).sum() * (YYT * YYT).sum()) + 1e-8
+        return (numerator / denominator).item()
+
     with torch.no_grad():
         for batch in test_data:
             session_ids = batch["session_ids"].to(device)
@@ -52,13 +62,26 @@ def evaluate_model(
                     session_ids, unit_ids, time_ids, ctx_mask
                 )
                 _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
-                Z_pred = predictor(Z_ctx)
-                h_pred = Z_pred.mean(dim=1)  # [B, D]
+
+                # MAEDecoder requires 4 args; LeJEPA predictor takes 1
+                if isinstance(predictor, MAEDecoder):
+                    Z_pred, _ = predictor(Z_ctx, Z_ctx, ctx_mask, attn_mask)
+                else:
+                    Z_pred = predictor(Z_ctx)
+                h_pred = Z_pred.mean(dim=1) # [B, D]
 
                 pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
                 cos_similarity = torch.nn.functional.cosine_similarity(
                     h_ctx, h_tgt
                 ).mean()
+
+                # R^2: how much variance in h_tgt is explained by h_pred
+                ss_res = ((h_pred - h_tgt) ** 2).sum()
+                ss_tot = ((h_tgt - h_tgt.mean(0)) ** 2).sum()
+                r2 = (1 - ss_res / (ss_tot + 1e-8)).item()
+
+                # CKA: representational similarity between context and target
+                cka_score = _cka(h_ctx, h_tgt)
 
                 # Stimulus labels (present only when test_data was built with include_labels=True)
                 labels = batch.get("labels", [])
@@ -76,13 +99,15 @@ def evaluate_model(
 
                 all_metrics.append(
                     {
-                        "stage": stage,
-                        "pred_loss": pred_loss.item(),
+                        "stage":          stage,
+                        "pred_loss":      pred_loss.item(),
                         "cos_similarity": cos_similarity.item(),
-                        "h_ctx": h_ctx.cpu().numpy(),
-                        "session_ids": session_ids.cpu().numpy(),
-                        "is_change": is_change,
-                        "stim_block": stim_block,
+                        "r2":             r2,
+                        "cka":            cka_score,
+                        "h_ctx":          h_ctx.cpu().numpy(),
+                        "session_ids":    session_ids.cpu().numpy(),
+                        "is_change":      is_change,
+                        "stim_block":     stim_block,
                     }
                 )
 
@@ -95,11 +120,12 @@ def evaluate_model(
     # Linear probe: can stimulus/session structure be decoded linearly from frozen representations?
     if stage == "LeJEPA" and "is_change" in results_df.columns:
         from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import StratifiedKFold, cross_val_score
+        from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_val_score
         from sklearn.preprocessing import LabelEncoder, StandardScaler
+        from sklearn.metrics import roc_auc_score
 
         all_h = np.vstack(results_df["h_ctx"].values)       # [N, D]
-        all_change = np.concatenate(results_df["is_change"].values)   # [N] bool
+        all_change = np.concatenate(results_df["is_change"].values).astype(int)   # [N] bool
         all_block = np.concatenate(results_df["stim_block"].values)   # [N] int
         all_sids = np.concatenate(results_df["session_ids"].values)   # [N] int
 
@@ -115,26 +141,33 @@ def evaluate_model(
         ran_probe = False
 
         # --- Probe 1: is_change (requires both True/False among stimulus windows) ---
+        # is_change - balanced acc + AUROC
         if valid.sum() >= 10 and len(np.unique(all_change[valid])) >= 2:
             X = StandardScaler().fit_transform(all_h[valid])
-            y = all_change[valid].astype(int)
+            y = all_change[valid]
             clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-            scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
+            bal_acc = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
+            proba = cross_val_predict(clf, X, y, cv=5, method="predict_proba")[:, 1]
+            auroc = roc_auc_score(y, proba)
             print(
-                f"\n[{stage}] Probe 1 — is_change  |  5-fold balanced acc: "
-                f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = 0.500)"
+                f"\n[{stage}] Probe 1 — is_change  |  "
+                f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  |  "
+                f"AUROC: {auroc:.3f}  (chance = 0.500)"
             )
             ran_probe = True
 
         # --- Probe 2: change-event window vs baseline (requires both stim_block classes) ---
         y_stim = (all_block >= 0).astype(int)
         if not ran_probe and len(np.unique(y_stim)) >= 2 and y_stim.sum() >= 10:
-            X = StandardScaler().fit_transform(all_h)
-            clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-            scores = cross_val_score(clf, X, y_stim, cv=5, scoring="balanced_accuracy")
+            X       = StandardScaler().fit_transform(all_h)
+            clf     = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+            bal_acc = cross_val_score(clf, X, y_stim, cv=5, scoring="balanced_accuracy")
+            proba   = cross_val_predict(clf, X, y_stim, cv=5, method="predict_proba")[:, 1]
+            auroc   = roc_auc_score(y_stim, proba)
             print(
-                f"\n[{stage}] Probe 2 — change-event vs baseline  |  5-fold balanced acc: "
-                f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = 0.500)\n"
+                f"\n[{stage}] Probe 2 — change-event vs baseline  |  "
+                f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  |  "
+                f"AUROC: {auroc:.3f}  (chance = 0.500)\n"
                 f"  (is_change had only 1 class — dataset only labels change events)"
             )
             ran_probe = True
@@ -144,19 +177,20 @@ def evaluate_model(
         # trained encoder should decode session from the representation far above chance.
         n_sessions = len(np.unique(all_sids))
         if n_sessions >= 2:
-            X = StandardScaler().fit_transform(all_h)
+            X     = StandardScaler().fit_transform(all_h)
             y_sid = LabelEncoder().fit_transform(all_sids)
-            clf = LogisticRegression(
+            clf   = LogisticRegression(
                 max_iter=1000, C=1.0, class_weight="balanced", solver="lbfgs"
             )
             n_folds = min(5, int(np.bincount(y_sid).min()))  # can't have more folds than min class size
             n_folds = max(n_folds, 2)
-            cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-            scores = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
-            chance = 1.0 / n_sessions
+            cv      = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            bal_acc = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
+            chance  = 1.0 / n_sessions
             print(
-                f"\n[{stage}] Probe 3 — session identity  |  {n_folds}-fold balanced acc: "
-                f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = {chance:.3f})"
+                f"\n[{stage}] Probe 3 — session identity  |  {n_folds}-fold  |  "
+                f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  "
+                f"(chance = {chance:.3f})"
             )
             if not ran_probe:
                 print(
