@@ -332,7 +332,11 @@ def identify_units(
             # Z_pred = predictor(Z_ctx)
             # h_pred = Z_pred.mean(dim=1)
             if isinstance(predictor, MAEDecoder):
-                Z_pred, _ = predictor(Z_ctx, Z_ctx, ctx_mask, attn_mask)
+                B, L, D = Z_ctx.shape
+                E = attn_mask.shape[1]
+                # Create a dummy x_target of correct spike-token shape [B, E, D]
+                dummy_target = torch.zeros(B, E, D, device=Z_ctx.device)
+                Z_pred, _ = predictor(Z_ctx, dummy_target, ctx_mask, attn_mask)
             else:
                 Z_pred = predictor(Z_ctx)
             h_pred = Z_pred.mean(dim=1)
