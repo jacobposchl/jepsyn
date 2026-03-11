@@ -18,6 +18,7 @@ from .training import (
 from .evaluation import (
     evaluate_model,
     identify_units,
+    run_linear_probe,
 )
 
 from .results import (

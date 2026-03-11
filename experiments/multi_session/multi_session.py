@@ -18,7 +18,8 @@ from jepsyn.data import REQUIRED_COLUMNS, SpikeWindowDataset, spike_collate_fn
 from jepsyn.losses import lejepa_loss
 from jepsyn.models import NeuralEncoder, NeuralPredictor
 from jepsyn.utils import (apply_unit_dropout, create_context_mask, evaluate_model,
-                          identify_units, save_results, update_ema, verify_config)
+                          identify_units, run_linear_probe, save_results, update_ema,
+                          verify_config)
 
 
 def load_and_prepare_data(
@@ -683,10 +684,15 @@ def main(config_path: Path) -> None:
         print("Evaluating MAE on Test Set")
         _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.75)
         mae_test_metrics = evaluate_model(
-            mae_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
+            mae_model, test_data, stage="MAE", mask_ratio=_mask_ratio
         )
         save_results(stage="MAE", phase="test", metrics=mae_test_metrics, config=config)
         print("MAE evaluation complete")
+
+        print("\n" + "=" * 60)
+        print("Running Linear Probes (MAE)")
+        run_linear_probe(mae_model, test_data, stage="MAE")
+        print("Linear probing complete")
 
     else:
         stage_name = "VICReg" if reg_type == "vicreg" else "LeJEPA"
@@ -715,8 +721,12 @@ def main(config_path: Path) -> None:
         )
         # save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
         save_results(stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config)
-        # print("LeJEPA evaluation complete")
         print(f"{stage_name} evaluation complete")
+
+        print("\n" + "=" * 60)
+        print(f"Running Linear Probes ({stage_name})")
+        run_linear_probe(jepa_model, test_data, stage=stage_name)
+        print("Linear probing complete")
 
         print("\n" + "=" * 60)
         print("Distilling into Spiking Neural Network")

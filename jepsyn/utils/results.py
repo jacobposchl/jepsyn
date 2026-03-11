@@ -38,7 +38,8 @@ def save_results(
     # Save metrics CSV (drop array columns used only for latent-space plots)
     csv_path = out_dir / "metrics.csv"
     metrics.drop(
-        columns=["h_ctx", "session_ids", "is_change", "stim_block"], errors="ignore"
+        columns=["h_tgt", "session_ids", "is_change", "image_name", "stim_block"],
+        errors="ignore",
     ).to_csv(csv_path, index=False)
     print(f"Saved metrics to {csv_path}")
 
@@ -55,9 +56,9 @@ def save_results(
         plt.close(fig)
         print(f"Saved test metrics to {out_dir / 'test_metrics.png'}")
 
-        if "h_ctx" in metrics.columns:
+        if "h_tgt" in metrics.columns:
             try:
-                latent_vectors = np.vstack(metrics["h_ctx"].values)
+                latent_vectors = np.vstack(metrics["h_tgt"].values)
                 session_labels = np.concatenate(metrics["session_ids"].values)
                 fig, embeddings2d = plot_umap_by_session(latent_vectors, session_labels, stage)
                 fig.savefig(out_dir / "latent_space.png")

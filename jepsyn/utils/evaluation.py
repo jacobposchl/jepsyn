@@ -22,20 +22,30 @@ def evaluate_model(
 
     Args:
         model:      Trained model bundle.
+                    JEPA: {"context_encoder", "target_encoder", "predictor"}
+                    MAE:  {"encoder", "decoder"}
         test_data:  Test DataLoader.
-        stage:      Model stage name ("LeJEPA" or "SNN").
+        stage:      Model stage name ("LeJEPA", "VICReg", or "MAE").
         mask_ratio: Fraction of real tokens to mask, matching training conditions for pred_loss eval.
 
     Returns:
         DataFrame containing per-batch evaluation metrics.
-        Includes h_ctx, session_ids, is_change, stim_block arrays for downstream plotting/probing.
+        Includes h_tgt, session_ids, is_change, image_name, stim_block arrays
+        for downstream plotting/probing.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if stage == "LeJEPA":
+    is_mae = "encoder" in model and "context_encoder" not in model
+
+    if is_mae:
+        encoder = model["encoder"].to(device).eval()
+        decoder = model["decoder"].to(device).eval()
+        d_model = encoder.encoder.d_model
+    else:
         context_encoder = model["context_encoder"].to(device).eval()
-        target_encoder = model["target_encoder"].to(device).eval()
-        predictor = model["predictor"].to(device).eval()
+        target_encoder  = model["target_encoder"].to(device).eval()
+        predictor       = model["predictor"].to(device).eval()
+
     all_metrics = []
 
     def _cka(X: torch.Tensor, Y: torch.Tensor) -> float:
@@ -51,16 +61,62 @@ def evaluate_model(
     with torch.no_grad():
         for batch in test_data:
             session_ids = batch["session_ids"].to(device)
-            unit_ids = batch["unit_ids"].to(device)
-            time_ids = batch["time_ids"].to(device)
-            attn_mask = batch["attention_mask"].to(device)
+            unit_ids    = batch["unit_ids"].to(device)
+            time_ids    = batch["time_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
 
-            if stage == "LeJEPA":
+            # Stimulus labels (present only when test_data was built with include_labels=True)
+            labels = batch.get("labels", [])
+            B = session_ids.size(0)
+            is_change = (
+                np.array([lb["is_change"] for lb in labels], dtype=bool)
+                if labels else np.zeros(B, dtype=bool)
+            )
+            stim_block = (
+                np.array([lb["stimulus_block"] for lb in labels], dtype=int)
+                if labels else np.full(B, -1, dtype=int)
+            )
+            image_name = (
+                [lb.get("image_name") for lb in labels]
+                if labels else [None] * B
+            )
+
+            if is_mae:
+                ctx_mask = create_context_mask(attn_mask, mask_ratio)
+                Z, _ = encoder(session_ids, unit_ids, time_ids, ctx_mask)
+
+                # Build reconstruction targets from unit embeddings
+                B_sz, E = unit_ids.shape
+                x_target = torch.zeros(B_sz, E, d_model, device=device)
+                for sid_val in session_ids.unique():
+                    sid_str = str(sid_val.item())
+                    mask = (session_ids == sid_val)
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+
+                _, pred_loss_val = decoder(Z, x_target, ctx_mask, attn_mask)
+
+                # Full-window unmasked representation for UMAP / downstream probing
+                _, h_tgt = encoder(session_ids, unit_ids, time_ids, attn_mask)
+
+                all_metrics.append(
+                    {
+                        "stage":       stage,
+                        "pred_loss":   pred_loss_val.item(),
+                        "h_tgt":       h_tgt.cpu().numpy(),
+                        "session_ids": session_ids.cpu().numpy(),
+                        "is_change":   is_change,
+                        "image_name":  image_name,
+                        "stim_block":  stim_block,
+                    }
+                )
+
+            else:
                 # Apply masking to match training conditions — gives an honest pred_loss
                 ctx_mask = create_context_mask(attn_mask, mask_ratio)
                 Z_ctx, h_ctx = context_encoder(
                     session_ids, unit_ids, time_ids, ctx_mask
                 )
+                # Target encoder: full unmasked window — this is the inference-time representation
                 _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
 
                 # MAEDecoder requires 4 args; LeJEPA predictor takes 1
@@ -68,7 +124,7 @@ def evaluate_model(
                     Z_pred, _ = predictor(Z_ctx, Z_ctx, ctx_mask, attn_mask)
                 else:
                     Z_pred = predictor(Z_ctx)
-                h_pred = Z_pred.mean(dim=1) # [B, D]
+                h_pred = Z_pred.mean(dim=1)  # [B, D]
 
                 pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
                 cos_similarity = torch.nn.functional.cosine_similarity(
@@ -83,20 +139,6 @@ def evaluate_model(
                 # CKA: representational similarity between context and target
                 cka_score = _cka(h_ctx, h_tgt)
 
-                # Stimulus labels (present only when test_data was built with include_labels=True)
-                labels = batch.get("labels", [])
-                B = session_ids.size(0)
-                is_change = (
-                    np.array([lb["is_change"] for lb in labels], dtype=bool)
-                    if labels
-                    else np.zeros(B, dtype=bool)
-                )
-                stim_block = (
-                    np.array([lb["stimulus_block"] for lb in labels], dtype=int)
-                    if labels
-                    else np.full(B, -1, dtype=int)
-                )
-
                 all_metrics.append(
                     {
                         "stage":          stage,
@@ -104,101 +146,188 @@ def evaluate_model(
                         "cos_similarity": cos_similarity.item(),
                         "r2":             r2,
                         "cka":            cka_score,
-                        "h_ctx":          h_ctx.cpu().numpy(),
+                        "h_tgt":          h_tgt.cpu().numpy(),
                         "session_ids":    session_ids.cpu().numpy(),
                         "is_change":      is_change,
+                        "image_name":     image_name,
                         "stim_block":     stim_block,
                     }
                 )
-
-            # if stage == "SNN": ...
 
     results_df = pd.DataFrame(all_metrics)
     print(f"\n[{stage}] Evaluation Metrics:")
     print(results_df.mean(numeric_only=True).to_string())
 
-    # Linear probe: can stimulus/session structure be decoded linearly from frozen representations?
-    if stage == "LeJEPA" and "is_change" in results_df.columns:
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_val_score
-        from sklearn.preprocessing import LabelEncoder, StandardScaler
-        from sklearn.metrics import roc_auc_score
-
-        all_h = np.vstack(results_df["h_ctx"].values)       # [N, D]
-        all_change = np.concatenate(results_df["is_change"].values).astype(int)   # [N] bool
-        all_block = np.concatenate(results_df["stim_block"].values)   # [N] int
-        all_sids = np.concatenate(results_df["session_ids"].values)   # [N] int
-
-        # Diagnostics: always print so we can see what's in the test set
-        valid = all_block >= 0
-        print(f"\n[{stage}] Label diagnostics (test set):")
-        print(f"  Total windows       : {len(all_change)}")
-        print(f"  stim_block >= 0     : {int(valid.sum())}  (windows with a stimulus event)")
-        print(f"  stim_block == -1    : {int((all_block == -1).sum())}  (baseline / no stimulus event)")
-        print(f"  is_change=True      : {int(all_change.sum())}  (among all windows)")
-        print(f"  Unique sessions     : {len(np.unique(all_sids))}")
-
-        ran_probe = False
-
-        # --- Probe 1: is_change (requires both True/False among stimulus windows) ---
-        # is_change - balanced acc + AUROC
-        if valid.sum() >= 10 and len(np.unique(all_change[valid])) >= 2:
-            X = StandardScaler().fit_transform(all_h[valid])
-            y = all_change[valid]
-            clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-            bal_acc = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
-            proba = cross_val_predict(clf, X, y, cv=5, method="predict_proba")[:, 1]
-            auroc = roc_auc_score(y, proba)
-            print(
-                f"\n[{stage}] Probe 1 — is_change  |  "
-                f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  |  "
-                f"AUROC: {auroc:.3f}  (chance = 0.500)"
-            )
-            ran_probe = True
-
-        # --- Probe 2: change-event window vs baseline (requires both stim_block classes) ---
-        y_stim = (all_block >= 0).astype(int)
-        if not ran_probe and len(np.unique(y_stim)) >= 2 and y_stim.sum() >= 10:
-            X       = StandardScaler().fit_transform(all_h)
-            clf     = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-            bal_acc = cross_val_score(clf, X, y_stim, cv=5, scoring="balanced_accuracy")
-            proba   = cross_val_predict(clf, X, y_stim, cv=5, method="predict_proba")[:, 1]
-            auroc   = roc_auc_score(y_stim, proba)
-            print(
-                f"\n[{stage}] Probe 2 — change-event vs baseline  |  "
-                f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  |  "
-                f"AUROC: {auroc:.3f}  (chance = 0.500)\n"
-                f"  (is_change had only 1 class — dataset only labels change events)"
-            )
-            ran_probe = True
-
-        # --- Probe 3: session identity — always available, confirms session geometry ---
-        # This is the guaranteed fallback: UMAP shows clear session clusters, so a well-
-        # trained encoder should decode session from the representation far above chance.
-        n_sessions = len(np.unique(all_sids))
-        if n_sessions >= 2:
-            X     = StandardScaler().fit_transform(all_h)
-            y_sid = LabelEncoder().fit_transform(all_sids)
-            clf   = LogisticRegression(
-                max_iter=1000, C=1.0, class_weight="balanced", solver="lbfgs"
-            )
-            n_folds = min(5, int(np.bincount(y_sid).min()))  # can't have more folds than min class size
-            n_folds = max(n_folds, 2)
-            cv      = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-            bal_acc = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
-            chance  = 1.0 / n_sessions
-            print(
-                f"\n[{stage}] Probe 3 — session identity  |  {n_folds}-fold  |  "
-                f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  "
-                f"(chance = {chance:.3f})"
-            )
-            if not ran_probe:
-                print(
-                    f"  (Probes 1 & 2 skipped — test sessions lack mixed stimulus labels.\n"
-                    f"   Fix: ensure non-change trial windows have stimulus metadata in the parquet.)"
-                )
-
     return results_df
+
+
+def run_linear_probe(
+    model: Dict[str, Any],
+    test_data: DataLoader,
+    stage: str,
+) -> Dict[str, Any]:
+    """
+    Extract frozen target representations and run linear probes to assess
+    downstream decoding performance. Call after identify_units() so test-session
+    unit embeddings are adapted.
+
+    Probes (all: 5-fold stratified CV, StandardScaler, LogisticRegression):
+        1. is_change detection    — binary,     balanced acc + AUROC  (chance = 0.500)
+        2. image_name identity    — multi-class, balanced acc + macro AUROC
+        3. session identity       — multi-class, balanced acc          (chance = 1/n_sessions)
+
+    Representation used:
+        JEPA models (LeJEPA / VICReg): h from target_encoder, full unmasked window.
+        MAE model:                     h from encoder,        full unmasked window.
+
+    Args:
+        model:     Model bundle. JEPA: {"context_encoder", "target_encoder", "predictor"}.
+                   MAE: {"encoder", "decoder"}.
+        test_data: Test DataLoader (must have include_labels=True).
+        stage:     Stage label for printing ("LeJEPA", "VICReg", "MAE").
+
+    Returns:
+        Dict with probe results keyed by probe name, each containing metric values.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_val_score
+    from sklearn.preprocessing import LabelEncoder, StandardScaler
+    from sklearn.metrics import roc_auc_score
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    is_mae = "encoder" in model and "context_encoder" not in model
+    encoder = (
+        model["encoder"].to(device).eval()
+        if is_mae
+        else model["target_encoder"].to(device).eval()
+    )
+
+    # --- Inference: collect full-window h and labels ---
+    all_h          = []
+    all_is_change  = []
+    all_image_name = []
+    all_session_ids = []
+
+    with torch.no_grad():
+        for batch in test_data:
+            session_ids = batch["session_ids"].to(device)
+            unit_ids    = batch["unit_ids"].to(device)
+            time_ids    = batch["time_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
+
+            # Full window, no masking — inference-time representation
+            _, h = encoder(session_ids, unit_ids, time_ids, attn_mask)
+
+            labels = batch.get("labels", [])
+            B = session_ids.size(0)
+            is_change = (
+                np.array([lb["is_change"] for lb in labels], dtype=bool)
+                if labels else np.zeros(B, dtype=bool)
+            )
+            image_name = (
+                [lb.get("image_name") for lb in labels]
+                if labels else [None] * B
+            )
+
+            all_h.append(h.cpu().numpy())
+            all_is_change.append(is_change)
+            all_image_name.extend(image_name)
+            all_session_ids.append(session_ids.cpu().numpy())
+
+    all_h           = np.vstack(all_h)                                    # [N, D]
+    all_is_change   = np.concatenate(all_is_change).astype(int)           # [N]
+    all_session_ids = np.concatenate(all_session_ids)                     # [N]
+    all_image_name  = np.array(all_image_name, dtype=object)              # [N]
+
+    print(f"\n[{stage}] Linear Probe  (representation dim={all_h.shape[1]}, N={all_h.shape[0]})")
+
+    results: Dict[str, Any] = {}
+
+    # --- Probe 1: is_change (binary) ---
+    y_change = all_is_change
+    if len(np.unique(y_change)) >= 2 and int(y_change.sum()) >= 10:
+        X   = StandardScaler().fit_transform(all_h)
+        clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+        bal_acc = cross_val_score(clf, X, y_change, cv=5, scoring="balanced_accuracy")
+        proba   = cross_val_predict(clf, X, y_change, cv=5, method="predict_proba")[:, 1]
+        auroc   = roc_auc_score(y_change, proba)
+        results["is_change"] = {
+            "balanced_acc":     float(bal_acc.mean()),
+            "balanced_acc_std": float(bal_acc.std()),
+            "auroc":            float(auroc),
+            "chance":           0.5,
+            "n":                int(len(y_change)),
+        }
+        print(
+            f"  Probe 1 — is_change        | "
+            f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f} | "
+            f"AUROC: {auroc:.3f}  (chance=0.500)"
+        )
+    else:
+        print(f"  Probe 1 — is_change        | skipped (insufficient data or single class)")
+
+    # --- Probe 2: image_name identity (multi-class) ---
+    has_image   = np.array([x is not None for x in all_image_name])
+    y_img_raw   = all_image_name[has_image]
+    X_img       = all_h[has_image]
+
+    if len(np.unique(y_img_raw)) >= 2 and len(y_img_raw) >= 20:
+        le      = LabelEncoder()
+        y_img   = le.fit_transform(y_img_raw)
+        n_cls   = len(le.classes_)
+        X       = StandardScaler().fit_transform(X_img)
+        clf     = LogisticRegression(
+            max_iter=1000, C=1.0, class_weight="balanced",
+            multi_class="multinomial", solver="lbfgs",
+        )
+        n_folds = max(2, min(5, int(np.bincount(y_img).min())))
+        cv      = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        bal_acc = cross_val_score(clf, X, y_img, cv=cv, scoring="balanced_accuracy")
+        proba   = cross_val_predict(clf, X, y_img, cv=cv, method="predict_proba")
+        auroc   = roc_auc_score(y_img, proba, multi_class="ovr", average="macro")
+        chance  = 1.0 / n_cls
+        results["image_name"] = {
+            "balanced_acc":     float(bal_acc.mean()),
+            "balanced_acc_std": float(bal_acc.std()),
+            "auroc":            float(auroc),
+            "chance":           chance,
+            "n_classes":        n_cls,
+            "n":                int(len(y_img)),
+        }
+        print(
+            f"  Probe 2 — image identity   | {n_cls} classes | "
+            f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f} | "
+            f"AUROC: {auroc:.3f}  (chance={chance:.3f})"
+        )
+    else:
+        print(f"  Probe 2 — image identity   | skipped (insufficient data or classes)")
+
+    # --- Probe 3: session identity ---
+    n_sessions = len(np.unique(all_session_ids))
+    if n_sessions >= 2:
+        le_sid  = LabelEncoder()
+        y_sid   = le_sid.fit_transform(all_session_ids)
+        X       = StandardScaler().fit_transform(all_h)
+        clf     = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+        n_folds = max(2, min(5, int(np.bincount(y_sid).min())))
+        cv      = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        bal_acc = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
+        chance  = 1.0 / n_sessions
+        results["session_id"] = {
+            "balanced_acc":     float(bal_acc.mean()),
+            "balanced_acc_std": float(bal_acc.std()),
+            "chance":           chance,
+            "n_sessions":       n_sessions,
+            "n":                int(len(y_sid)),
+        }
+        print(
+            f"  Probe 3 — session identity | {n_sessions} sessions | "
+            f"balanced acc: {bal_acc.mean():.3f} ± {bal_acc.std():.3f}  "
+            f"(chance={chance:.3f})"
+        )
+
+    return results
 
 
 def identify_units(
@@ -329,8 +458,6 @@ def identify_units(
             Z_ctx, h_ctx = context_encoder(
                 session_ids_t, unit_ids_t, time_ids_t, ctx_mask
             )
-            # Z_pred = predictor(Z_ctx)
-            # h_pred = Z_pred.mean(dim=1)
             if isinstance(predictor, MAEDecoder):
                 B, L, D = Z_ctx.shape
                 E = attn_mask.shape[1]
