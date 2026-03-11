@@ -278,8 +278,7 @@ def run_linear_probe(
         n_cls   = len(le.classes_)
         X       = StandardScaler().fit_transform(X_img)
         clf     = LogisticRegression(
-            max_iter=1000, C=1.0, class_weight="balanced",
-            multi_class="multinomial", solver="lbfgs",
+            max_iter=5000, C=1.0, class_weight="balanced", solver="saga",
         )
         n_folds = max(2, min(5, int(np.bincount(y_img).min())))
         cv      = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
