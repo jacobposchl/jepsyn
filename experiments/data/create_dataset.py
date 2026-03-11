@@ -29,10 +29,16 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("Config file must contain a top-level mapping.")
 
-    if "data_path" not in raw or not raw["data_path"]:
-        raise ValueError(
-            "Config must define a non-empty 'data_path' for the output file."
-        )
+    # Resolve relative paths relative to the config file's directory.
+    config_dir = config_path.resolve().parent
+
+    # data_path is optional: if omitted, the Parquet is written to
+    # datasets/<config_stem>.parquet at the repo root (3 levels up from configs/).
+    if raw.get("data_path"):
+        data_path = (config_dir / raw["data_path"]).resolve()
+    else:
+        repo_root = config_dir.parents[2]  # configs/ → data/ → experiments/ → repo root
+        data_path = repo_root / "datasets" / f"{config_path.stem}.parquet"
 
     dataset_cfg = raw.get("dataset_config")
     if not isinstance(dataset_cfg, dict):
@@ -59,29 +65,17 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
     min_firing_rate = float(quality_cfg.get("min_firing_rate", 0.1))
     max_isi_violations = float(quality_cfg.get("max_isi_violations", 1.0))
 
-    # set window parameters; use defaults if not provided in config
+    # Spikes are stored as raw timestamps (not binned) so only the window
+    # duration matters.  bin_size_ms and stride_ms are not used by this
+    # pipeline — windows are event-aligned, one per stimulus flash.
     windowing_cfg = dataset_cfg.get("windowing") or {}
-    bin_size_ms = float(windowing_cfg.get("bin_size_ms", 10.0))
     window_size_ms = float(windowing_cfg.get("window_size_ms", 400.0))
 
-    if bin_size_ms <= 0 or window_size_ms <= 0:
-        raise ValueError(
-            "windowing.bin_size_ms and windowing.window_size_ms must be > 0."
-        )
-
-    stride_ms = float(windowing_cfg.get("stride_ms", window_size_ms))
-
-    if window_size_ms % bin_size_ms != 0:
-        raise ValueError(
-            "windowing.window_size_ms must be an integer multiple of windowing.bin_size_ms."
-        )
-
-    # Resolve relative paths relative to the config file's directory so that
-    # the config works correctly regardless of the working directory.
-    config_dir = config_path.resolve().parent
+    if window_size_ms <= 0:
+        raise ValueError("windowing.window_size_ms must be > 0.")
 
     return {
-        "data_path": (config_dir / raw["data_path"]).resolve(),
+        "data_path": data_path,
         "cache_dir": (config_dir / cache_dir).resolve(),
         "session_ids": [int(s) for s in session_ids],  # empty list = auto-discover
         "brain_areas": brain_areas,
@@ -91,9 +85,7 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
             "max_isi_violations": max_isi_violations,
         },
         "windowing": {
-            "bin_size_ms": bin_size_ms,
             "window_size_ms": window_size_ms,
-            "stride_ms": stride_ms,
         },
     }
 
@@ -302,8 +294,8 @@ def main(config_path: Path) -> None:
         f"max_isi_violations={cfg['quality']['max_isi_violations']}"
     )
     print(
-        f"  Windowing: bin_size_ms={cfg['windowing']['bin_size_ms']}, "
-        f"window_size_ms={cfg['windowing']['window_size_ms']}"
+        f"  Windowing: window_size_ms={cfg['windowing']['window_size_ms']} ms "
+        f"(event-aligned, raw timestamps)"
     )
 
     all_rows: List[Dict[str, Any]] = []
