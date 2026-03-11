@@ -118,14 +118,10 @@ def lejepa_loss(
         reg_loss = (vic_std * std_loss) + (vic_cov * cov_loss)
         total_loss = (vic_sim * prediction_loss) + reg_loss
 
-    elif reg_type == "none":
-        reg_loss = torch.tensor(0.0, device=z_context.device)
-        total_loss = prediction_loss
-
     else:
         raise ValueError(
             f"Unknown regularization type: {reg_type}\n"
-            + "expected 'sigreg' or 'vicreg', or 'none'"
+            + "expected 'sigreg' or 'vicreg'"
         )
 
     return total_loss, prediction_loss, reg_loss

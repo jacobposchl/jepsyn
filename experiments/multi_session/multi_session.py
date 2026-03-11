@@ -740,7 +740,6 @@ def main(config_path: Path) -> None:
     print("Multi-Session Experiment Complete!")
     print("=" * 60)
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run multi-session neural experiment with LeJEPA and SNN distillation."
