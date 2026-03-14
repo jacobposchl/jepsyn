@@ -496,6 +496,8 @@ def train_mae(
         **encoder_kwargs,
     ).to(device)
 
+    print(encoder)
+
     # MAE Decoder
     decoder = MAEDecoder(
         d_model=d_model,
@@ -842,7 +844,7 @@ def main(config_path: Path) -> None:
         print(f"Evaluating {stage_name} on Test Set")
         _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
         jepa_test_metrics = evaluate_model(
-            jepa_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
+            jepa_model, test_data, stage=stage_name, mask_ratio=_mask_ratio
         )
         # save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
         save_results(stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config)

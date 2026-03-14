@@ -1,4 +1,4 @@
-# experiments/multi_session/configs/config_mae.yaml
+ # experiments/multi_session/configs/config_mae.yaml
 
 # MAE ablation: reconstructs masked spike embeddings in input space
 # (while LeJEPA which predicts in latent space)
