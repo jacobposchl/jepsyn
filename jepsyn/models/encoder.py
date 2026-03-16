@@ -206,40 +206,37 @@ class PerceiverEncoder(nn.Module):
         B      = session_ids.shape[0]
         device = session_ids.device
 
-        delim_embeds_list: List[torch.Tensor] = []
-        delim_times_list:  List[torch.Tensor] = []
-
-        for i in range(B):
-            sid      = session_ids[i].item()
-            unit_map = self.session_unit_maps[sid]
-            n_units  = len(unit_map)
-
-            # 1-indexed unit embedding indices for all registered units in session.
+        # Compute delimiter embeddings once per unique session, then scatter to all samples.
+        # Avoids re-running unit_embeds[sid](...) for every sample in the batch.
+        delim_data: dict = {}  # sid (int) -> (embeds [2*n_units, D], times [2*n_units])
+        for sid_t in session_ids.unique():
+            sid     = sid_t.item()
+            n_units = len(self.session_unit_maps[sid])
             unit_indices = torch.arange(1, n_units + 1, dtype=torch.long, device=device)
-            unit_embs    = self.unit_embeds[str(sid)](unit_indices)  # [n_units, D]
-
-            start_type   = torch.zeros(n_units, dtype=torch.long, device=device)
-            end_type     = torch.ones(n_units,  dtype=torch.long, device=device)
-            start_tokens = self.delimiter_embed(start_type) + unit_embs  # [n_units, D]
-            end_tokens   = self.delimiter_embed(end_type)   + unit_embs  # [n_units, D]
-
-            delim_embeds_list.append(torch.cat([start_tokens, end_tokens], dim=0))  # [2*n_units, D]
-            delim_times_list.append(torch.cat([
+            unit_embs    = self.unit_embeds[str(sid)](unit_indices)           # [n_units, D]
+            start_tokens = self.delimiter_embed.weight[0] + unit_embs         # [n_units, D]
+            end_tokens   = self.delimiter_embed.weight[1] + unit_embs         # [n_units, D]
+            embeds = torch.cat([start_tokens, end_tokens], dim=0)             # [2*n_units, D]
+            times  = torch.cat([
                 torch.zeros(n_units, device=device),
                 torch.full((n_units,), self.window_size_s, device=device),
-            ]))  # [2*n_units]
+            ])                                                                 # [2*n_units]
+            delim_data[sid] = (embeds, times)
 
         # Pad delimiter tokens across batch to the largest delimiter count.
-        max_delim  = max(t.shape[0] for t in delim_embeds_list)
+        max_delim  = max(v[0].shape[0] for v in delim_data.values())
         delim_pad  = torch.zeros(B, max_delim, self.d_model, device=device)
         times_pad  = torch.zeros(B, max_delim, device=device)
         delim_mask = torch.zeros(B, max_delim, dtype=torch.bool, device=device)
 
-        for i, (embs, times) in enumerate(zip(delim_embeds_list, delim_times_list)):
-            n = embs.shape[0]
-            delim_pad[i, :n]  = embs
-            times_pad[i, :n]  = times
-            delim_mask[i, :n] = True
+        for sid_t in session_ids.unique():
+            sid  = sid_t.item()
+            embs, times = delim_data[sid]
+            n    = embs.shape[0]
+            rows = (session_ids == sid_t)               # [B] bool mask for this session
+            delim_pad[rows, :n]  = embs
+            times_pad[rows, :n]  = times
+            delim_mask[rows, :n] = True
 
         spike_times_s = time_ids.float() / 1000.0                          # [B, E] ms → s
         x_combined    = torch.cat([x_unit, delim_pad], dim=1)              # [B, E+max_delim, D]

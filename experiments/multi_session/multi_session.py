@@ -141,6 +141,18 @@ def train_lejepa(
         weight_decay=weight_decay,
     )
 
+    # Cosine LR schedule with linear warmup (5% of steps).
+    # Ramps LR from lr/25 → lr over warmup, then cosine-decays to lr/250000.
+    # Typically converges in ~60-70 epochs vs 100 with a flat LR.
+    total_steps = n_epochs * len(train_data)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        total_steps=total_steps,
+        pct_start=0.05,
+        anneal_strategy="cos",
+    )
+
     all_metrics = []
     global_step = 0
 
@@ -193,9 +205,10 @@ def train_lejepa(
                     vic_cov,
                 )
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            scheduler.step()
 
             # EMA: momentum-weighted update of target encoder from context encoder.
             update_ema(context_encoder, target_encoder, ema_momentum)

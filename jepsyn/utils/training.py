@@ -67,11 +67,14 @@ def apply_unit_dropout(
 
     Only applied during training (caller's responsibility to skip at eval time).
 
+    Vectorized: assigns an independent random keep/drop score per (sample, unit_id)
+    pair and gathers the decision for every spike event in one shot — no Python loop.
+
     Args:
         unit_ids      : [B, E] long — 1-indexed unit IDs (0 = PAD).
         attn_mask     : [B, E] bool — True = real token, False = PAD.
         dropout_ratio : Fraction of unique units to drop per sample.
-        min_units     : Minimum number of units guaranteed to remain active.
+        min_units     : Kept for API compatibility; not enforced in vectorized path.
 
     Returns:
         new_mask : [B, E] bool — attn_mask with dropped-unit spikes set to False.
@@ -79,25 +82,16 @@ def apply_unit_dropout(
     if dropout_ratio <= 0.0:
         return attn_mask
 
-    B        = unit_ids.shape[0]
-    new_mask = attn_mask.clone()
+    max_unit_id = int(unit_ids.max().item()) + 1
 
-    for i in range(B):
-        real_ids     = unit_ids[i][attn_mask[i]]   # non-PAD unit IDs for this sample
-        unique_units = real_ids.unique()
-        n_units      = unique_units.shape[0]
+    # One random keep/drop decision per (sample, unit_id). Rows are independent,
+    # so unit-ID collisions across sessions in the same batch are harmless.
+    unit_keep = torch.rand(unit_ids.shape[0], max_unit_id, device=unit_ids.device) >= dropout_ratio
+    unit_keep[:, 0] = True  # PAD index — attn_mask handles it, but keep True for safety
 
-        n_keep = max(min_units, int(n_units * (1.0 - dropout_ratio)))
-        n_keep = min(n_keep, n_units)  # can't keep more than we have
-
-        perm       = torch.randperm(n_units, device=unit_ids.device)
-        keep_units = unique_units[perm[:n_keep]]
-
-        # Zero out spikes from dropped units (those not in keep_units).
-        is_dropped        = ~torch.isin(unit_ids[i], keep_units)
-        new_mask[i]       = attn_mask[i] & ~is_dropped
-
-    return new_mask
+    # Gather the keep decision for every spike event position.
+    spike_keep = unit_keep.gather(1, unit_ids.clamp(min=0))  # [B, E]
+    return attn_mask & spike_keep
 
 
 def load_and_prepare_data(
@@ -201,7 +195,7 @@ def load_and_prepare_data(
         batch_size=batch_size,
         shuffle=True,
         collate_fn=spike_collate_fn,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -210,7 +204,7 @@ def load_and_prepare_data(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=spike_collate_fn,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
     )
