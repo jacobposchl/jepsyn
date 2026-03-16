@@ -82,33 +82,33 @@ def evaluate_model(
             Z_pred = predictor(Z_ctx)
             h_pred = Z_pred.mean(dim=1)  # [B, D]
 
-                pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
-                cos_similarity = torch.nn.functional.cosine_similarity(
-                    h_ctx, h_tgt
-                ).mean()
+            pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
+            cos_similarity = torch.nn.functional.cosine_similarity(
+                h_ctx, h_tgt
+            ).mean()
 
-                # R^2: how much variance in h_tgt is explained by h_pred
-                ss_res = ((h_pred - h_tgt) ** 2).sum()
-                ss_tot = ((h_tgt - h_tgt.mean(0)) ** 2).sum()
-                r2 = (1 - ss_res / (ss_tot + 1e-8)).item()
+            # R^2: how much variance in h_tgt is explained by h_pred
+            ss_res = ((h_pred - h_tgt) ** 2).sum()
+            ss_tot = ((h_tgt - h_tgt.mean(0)) ** 2).sum()
+            r2 = (1 - ss_res / (ss_tot + 1e-8)).item()
 
-                # CKA: representational similarity between context and target
-                cka_score = _cka(h_ctx, h_tgt)
+            # CKA: representational similarity between context and target
+            cka_score = _cka(h_ctx, h_tgt)
 
-                all_metrics.append(
-                    {
-                        "stage":          stage,
-                        "pred_loss":      pred_loss.item(),
-                        "cos_similarity": cos_similarity.item(),
-                        "r2":             r2,
-                        "cka":            cka_score,
-                        "h_tgt":          h_tgt.cpu().numpy(),
-                        "session_ids":    session_ids.cpu().numpy(),
-                        "is_change":      is_change,
-                        "image_name":     image_name,
-                        "stim_block":     stim_block,
-                    }
-                )
+            all_metrics.append(
+                {
+                    "stage":          stage,
+                    "pred_loss":      pred_loss.item(),
+                    "cos_similarity": cos_similarity.item(),
+                    "r2":             r2,
+                    "cka":            cka_score,
+                    "h_tgt":          h_tgt.cpu().numpy(),
+                    "session_ids":    session_ids.cpu().numpy(),
+                    "is_change":      is_change,
+                    "image_name":     image_name,
+                    "stim_block":     stim_block,
+                }
+            )
 
     results_df = pd.DataFrame(all_metrics)
     print(f"\n[{stage}] Evaluation Metrics:")
@@ -306,15 +306,6 @@ def identify_units(
         config           : Config dict; reads training_config.{unit_id_steps,
                            unit_id_lr, mask_ratio, lambd, num_slices}
     """
-    if "encoder" in model and "context_encoder" not in model:
-        import copy
-        _decoder = model["decoder"]
-        model = {
-            "context_encoder": model["encoder"],
-            "target_encoder":  copy.deepcopy(model["encoder"]),
-            "predictor":       _decoder,
-        }
-
     train_cfg = config.get("training_config", {})
     n_steps = train_cfg.get("unit_id_steps", 200)
     lr = train_cfg.get("unit_id_lr", 1e-3)
