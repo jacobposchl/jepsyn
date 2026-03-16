@@ -102,12 +102,12 @@ def apply_unit_dropout(
 
 def load_and_prepare_data(
     config: Dict[str, Any],
-) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[int, Dict[int, int]], List[int]]:
+) -> Tuple[DataLoader, DataLoader, Dict[int, Dict[int, int]], List[int]]:
     """
     Load the spike-window parquet, validate it, split by session, and return DataLoaders.
 
     The split is done at the **session level**: entire sessions are held out for
-    val and test — no windows from test sessions appear in train or val.
+    test — no windows from test sessions appear in training.
     test_session_ids contains sessions the encoder has never seen during training;
     identify_units() is the only adaptation allowed on those sessions before probing.
 
@@ -122,7 +122,7 @@ def load_and_prepare_data(
         config: Validated configuration dict (from verify_config).
 
     Returns:
-        (train_loader, val_loader, test_loader, session_unit_maps, test_session_ids)
+        (train_loader, test_loader, session_unit_maps, test_session_ids)
         session_unit_maps: {session_id: {raw_unit_id: 1-indexed contiguous idx}}
             Needed by the training function to size per-session embedding tables.
     """
@@ -175,31 +175,22 @@ def load_and_prepare_data(
         f"(sizes: {[len(m) for m in session_unit_maps.values()]})"
     )
 
-    # Session-level train / val / test split.
+    # Session-level train / test split.
     # Entire sessions are assigned to exactly one partition — no session appears
-    # in more than one of {train, val, test}.
+    # in both train and test.
     data_cfg = config.get("data", {})
-    train_size = data_cfg.get("train_split", 0.7)
-    val_size = data_cfg.get("val_split", 0.15)
-    test_size = data_cfg.get("test_split", 0.15)
+    test_size = data_cfg.get("test_split", 0.3)
     random_state = data_cfg.get("random_state", 42)
 
     unique_sessions = dataset["session_id"].unique()
-    train_val_sessions, test_sessions = train_test_split(
+    train_sessions, test_sessions = train_test_split(
         unique_sessions, test_size=test_size, random_state=random_state
-    )
-    train_sessions, val_sessions = train_test_split(
-        train_val_sessions,
-        test_size=val_size / (train_size + val_size),
-        random_state=random_state,
     )
 
     train_df = dataset[dataset["session_id"].isin(train_sessions)]
-    val_df = dataset[dataset["session_id"].isin(val_sessions)]
     test_df = dataset[dataset["session_id"].isin(test_sessions)]
 
     print(f"Train: {len(train_df)} windows ({len(train_sessions)} sessions)")
-    print(f"Val:   {len(val_df)} windows ({len(val_sessions)} sessions)")
     print(f"Test:  {len(test_df)} windows ({len(test_sessions)} sessions)")
 
     batch_size = config.get("training_config", {}).get("batch_size", 32)
@@ -209,15 +200,6 @@ def load_and_prepare_data(
         SpikeWindowDataset(train_df, session_unit_maps),
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=spike_collate_fn,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-    val_loader = DataLoader(
-        SpikeWindowDataset(val_df, session_unit_maps),
-        batch_size=batch_size,
-        shuffle=False,
         collate_fn=spike_collate_fn,
         num_workers=2,
         pin_memory=True,
@@ -235,7 +217,6 @@ def load_and_prepare_data(
 
     return (
         train_loader,
-        val_loader,
         test_loader,
         session_unit_maps,
         sorted(int(s) for s in test_sessions.tolist()),

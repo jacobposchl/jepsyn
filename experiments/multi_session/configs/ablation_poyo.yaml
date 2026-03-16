@@ -5,9 +5,7 @@ results_out_path: ../../../results/ablation_poyo
 plots_out_path: ../../../plots/ablation_poyo
 
 data:
-  train_split: 0.7
-  test_split: 0.15
-  val_split: 0.15
+  test_split: 0.3
   random_state: 42
 
 model_config:

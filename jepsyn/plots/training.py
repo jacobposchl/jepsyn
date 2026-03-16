@@ -12,10 +12,10 @@ def plot_training_curves(
     stage: str,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Plot train/val total loss and pred/reg loss breakdown.
+    Plot train total loss and pred/reg loss breakdown.
 
     Args:
-        metrics: DataFrame with columns epoch, train_loss, val_loss,
+        metrics: DataFrame with columns epoch, train_loss,
                  and optionally train_pred_loss, train_reg_loss.
         stage:   Experiment stage label (e.g. "LeJEPA", "VICReg").
 
@@ -27,7 +27,6 @@ def plot_training_curves(
 
     if "train_loss" in metrics.columns:
         axes[0].plot(metrics["epoch"], metrics["train_loss"], label="train")
-        axes[0].plot(metrics["epoch"], metrics["val_loss"], label="val")
         axes[0].set_xlabel("Epoch")
         axes[0].set_ylabel("Loss")
         axes[0].set_title("Total Loss")
@@ -53,7 +52,7 @@ def plot_distillation_curves(
 
     Args:
         metrics: DataFrame with columns epoch, train_loss, and optionally
-                 val_loss, distill_loss, homeo_loss.
+                 distill_loss, homeo_loss.
         stage:   Experiment stage label (e.g. "SNN").
 
     Returns:

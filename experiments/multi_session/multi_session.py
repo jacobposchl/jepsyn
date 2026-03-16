@@ -32,7 +32,6 @@ from jepsyn.utils import (
 def train_lejepa(
     config: Dict[str, Any],
     train_data: DataLoader,
-    val_data: DataLoader,
     unit_maps: Dict[int, Dict[int, int]],
 ) -> Tuple[Dict[str, Any], pd.DataFrame]:
     """
@@ -54,13 +53,12 @@ def train_lejepa(
     Args:
         config     : Validated config dict (from verify_config).
         train_data : Training DataLoader.
-        val_data   : Validation DataLoader.
         unit_maps  : {session_id: {raw_unit_id: 1-indexed idx}} from load_and_prepare_data.
 
     Returns:
         (model_bundle, metrics_df)
         model_bundle: {"context_encoder", "target_encoder", "predictor"}
-        metrics_df columns: epoch, train_loss, train_pred_loss, train_reg_loss, val_loss
+        metrics_df columns: epoch, train_loss, train_pred_loss, train_reg_loss
     """
     model_cfg = config.get("model_config", {})
     train_cfg = config.get("training_config", {})
@@ -208,48 +206,7 @@ def train_lejepa(
             n_train += 1
             global_step += 1
 
-        # ---- Validation ----
-        context_encoder.eval()
-        predictor.eval()
-
-        val_loss_sum = 0.0
-        n_val = 0
-
-        with torch.no_grad():
-            for batch in val_data:
-                session_ids = batch["session_ids"].to(device)
-                unit_ids = batch["unit_ids"].to(device)
-                time_ids = batch["time_ids"].to(device)
-                attn_mask = batch["attention_mask"].to(device)
-
-                ctx_mask = create_context_mask(attn_mask, mask_ratio)
-
-                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=is_cuda):
-                    Z_ctx, h_ctx = context_encoder(
-                        session_ids, unit_ids, time_ids, ctx_mask
-                    )
-                    _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
-                    Z_pred = predictor(Z_ctx)
-                    h_pred = Z_pred.mean(dim=1)  # [B, D]
-
-                    loss, _, _ = lejepa_loss(
-                        h_ctx,
-                        h_tgt,
-                        h_pred,
-                        global_step,
-                        reg_type,
-                        lambd,
-                        num_slices,
-                        vic_sim,
-                        vic_std,
-                        vic_cov,
-                    )
-
-                val_loss_sum += loss.item()
-                n_val += 1
-
         train_loss_avg = train_loss_sum / max(n_train, 1)
-        val_loss_avg = val_loss_sum / max(n_val, 1)
 
         all_metrics.append(
             {
@@ -257,7 +214,6 @@ def train_lejepa(
                 "train_loss": train_loss_avg,
                 "train_pred_loss": train_pred_sum / max(n_train, 1),
                 "train_reg_loss": train_reg_sum / max(n_train, 1),
-                "val_loss": val_loss_avg,
             }
         )
 
@@ -268,7 +224,7 @@ def train_lejepa(
         pred_pct = 100 * w_pred / max(train_loss_avg, 1e-9)
         reg_pct = 100 * w_reg / max(train_loss_avg, 1e-9)
         print(
-            f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}"
+            f"Epoch {epoch:3d} | train={train_loss_avg:.4f}"
             f" | pred={avg_pred:.4f} ({pred_pct:.1f}%) | reg={avg_reg:.4f} ({reg_pct:.1f}%)"
         )
 
@@ -397,17 +353,15 @@ def load_checkpoint(
 
 
 def distill_snn(
-    config: Dict[str, Any], teacher_model: Any, train_data: Any, val_data: Any
+    config: Dict[str, Any], teacher_model: Any, train_data: Any
 ) -> Tuple[Any, pd.DataFrame]:
     """
     Distill LeJEPA teacher into spiking neural network student.
-    Includes validation during distillation.
 
     Args:
         config: Configuration dictionary
         teacher_model: Trained LeJEPA model bundle
         train_data: Training DataLoader
-        val_data: Validation DataLoader
 
     Returns:
         Tuple of (trained_snn, distillation_metrics_df)
@@ -499,9 +453,7 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print("Loading and Preparing Data")
-    train_data, val_data, test_data, unit_maps, test_session_ids = (
-        load_and_prepare_data(config)
-    )
+    train_data, test_data, unit_maps, test_session_ids = load_and_prepare_data(config)
     print("Data loaded successfully")
 
     reg_type = config.get("training_config", {}).get("reg_type", "sigreg").lower()
@@ -515,9 +467,7 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print(f"Training {stage_name} Model")
-    jepa_model, jepa_train_metrics = train_lejepa(
-        config, train_data, val_data, unit_maps
-    )
+    jepa_model, jepa_train_metrics = train_lejepa(config, train_data, unit_maps)
     save_results(
         stage=stage_name,
         phase="training",
@@ -543,7 +493,7 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print("Distilling into Spiking Neural Network")
-    snn_result = distill_snn(config, jepa_model, train_data, val_data)
+    snn_result = distill_snn(config, jepa_model, train_data)
     if snn_result is not None:
         snn_model, snn_train_metrics = snn_result
         save_results(
