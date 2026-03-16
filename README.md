@@ -1,77 +1,112 @@
-## SNN-JEPA: Spiking Neural Networks - Joint-Embedding Predictive Architecture
+# SNN-JEPA: Joint-Embedding Predictive Architecture for Neural Population Activity
 
-SNN-JEPA is a self-supervised learning framework for learning compact, informative representations of high-dimensional neural population activity. It combines **Spiking Neural Networks (SNNs)** with a **Joint-Embedding Predictive Architecture (JEPA)** to model the temporal dynamics of brain activity recorded via Neuropixels.
+Self-supervised learning framework for learning cross-session representations of multi-electrode Neuropixels recordings. A **LeJEPA teacher** (PerceiverIO encoder + EMA target + predictor) is trained via masked prediction, then distilled into a **Spiking Neural Network** student via CCA-based knowledge distillation.
 
-### Key components
+---
 
-- **`jepsyn/models`**: `NeuralEncoder` (Transformer-based encoder for binned spikes), `NeuralPredictor` (MLP/RNN predictor in latent space), and `SNNEncoder` (snntorch-based spiking encoder).
-- **`jepsyn/losses`**: `lejepa_loss` (prediction + SIGReg regularization) and `DistillationLoss` (CCA-based distillation + homeostatic penalty).
-- **`jepsyn/data`**: `VBNDataHandler` for the Allen Visual Behavior Neuropixels dataset and `NeuropixelsPreprocessor` for cleaning, filtering, and binning spikes.
-- **`jepsyn/plots`**: Utilities for loss curves, latent-space metrics, spike count distributions, and prediction diagnostics.
+## Architecture
 
-### Project structure
+### LeJEPA Teacher
+- **Context encoder** (`PerceiverEncoder`): POYO-style PerceiverIO with per-session unit embedding tables and RoPE temporal encoding. Takes masked spike events and compresses them to a fixed set of latent slots `[B, L, D]`.
+- **Target encoder**: EMA copy of the context encoder (no gradients). Sees full (unmasked) spikes; provides stable prediction targets.
+- **Predictor** (`NeuralPredictor`): Narrow transformer (intentionally shallower than encoder) mapping context latents → predicted target latents.
+- **Loss**: MSE prediction loss + regularization. Three modes: `sigreg` (Sketched Isotropic Gaussian), `vicreg` (Variance-Invariance-Covariance), or `no_reg`.
 
-- **`jepsyn/`**: Core library code (models, losses, data, plotting, utils).
-- **`experiments/single_session/`**: Proof-of-concept training + distillation on a single ecephys session.
-- **`experiments/multi_session/`**: Scaffold for multi-session training driven by YAML configs.
-- **`visual_behavior_neuropixels_data/`**: Local cache for the Allen Neuropixels project (created by `allensdk`).
+### SNN Student
+- Distilled from teacher latents using CCA loss + homeostatic firing-rate penalty (`DistillationLoss`).
+- Implemented via `snntorch` Leaky Integrate-and-Fire neurons.
 
-### Single-session proof-of-concept
+---
 
-This is the main working pipeline right now: it trains a JEPA **teacher** (Transformer encoder + predictor) and then distills it into a spiking **student**.
+## Project structure
 
-- **Entry point**: `experiments/single_session/single_session.py`
-- **What it does**:
-  - Downloads/loads one Visual Behavior Neuropixels session.
-  - Preprocesses and bins spikes around image-change events.
-  - Trains a JEPA teacher on context → future prediction.
-  - Distills the teacher into an SNN using CCA + homeostatic regularization.
-  - Saves plots and summaries under `runs/proof_of_concept/`.
-
-**Example (local GPU or remote GPU with VS Code tunnel):**
-
-```bash
-export MPLBACKEND=Agg  # headless plotting
-python -m experiments.single_session.single_session <SESSION_ID> \
-  --dataset-dir /path/to/preprocessed/session_<SESSION_ID>.pkl
+```
+snn-jepa/
+├── jepsyn/                          # Core library
+│   ├── models/
+│   │   ├── encoder.py               # PerceiverEncoder (NeuralEncoder wrapper)
+│   │   ├── predictor.py             # NeuralPredictor
+│   │   └── snn.py                   # SNN model definition
+│   ├── losses/
+│   │   ├── lejepa.py                # lejepa_loss (SIGReg / VICReg / no_reg)
+│   │   └── distillation.py          # DistillationLoss (CCA + homeostatic)
+│   ├── data/
+│   │   ├── dataset.py               # SpikeWindowDataset + spike_collate_fn
+│   │   ├── data_handler.py          # Allen VBN session loading
+│   │   └── preprocess.py            # Unit filtering and spike extraction
+│   ├── plots/
+│   │   ├── latent_space.py          # UMAP plots (by session, is_change, image)
+│   │   └── training.py              # Loss curves
+│   └── utils/
+│       ├── training.py              # create_context_mask, update_ema, apply_unit_dropout, load_and_prepare_data
+│       ├── evaluation.py            # evaluate_model, identify_units, run_linear_probe
+│       ├── config_helper.py         # verify_config
+│       └── results.py               # save_results
+│
+├── experiments/
+│   ├── data/                        # Dataset pipeline (run once)
+│   │   ├── create_dataset.py        # Extract sessions → write Parquet
+│   │   ├── verify_dataset.py        # Validate Parquet before training
+│   │   └── data_analysis.py         # Interactive session/metadata explorer
+│   ├── multi_session/               # Main experiment pipeline
+│   │   ├── multi_session.py         # train_lejepa, distill_snn, load_checkpoint
+│   │   ├── multi_session_runner.ipynb  # Interactive runner (primary interface)
+│   │   └── configs/                 # Experiment configs (see below)
+│   └── single_session/              # Legacy single-session proof-of-concept
+│
+├── datasets/                        # Pre-built Parquet files (gitignored)
+├── results/                         # Checkpoints and metrics CSVs (gitignored)
+└── plots/                           # Generated figures (gitignored)
 ```
 
-If `--dataset-dir` is omitted, the script will create `preprocessed/session_<SESSION_ID>.pkl` using the Allen cache under `visual_behavior_neuropixels_data/`.
+---
 
-### Multi-session experiment (WIP)
+## Getting started
 
-The multi-session workflow is split into **two pipelines** so you don’t re-extract sessions on every run:
+### 1. Build a dataset (run once)
 
-1. **Dataset pipeline** (run once): `experiments/data/create_dataset.py` — extracts sessions from the Allen cache and writes a single windowed Parquet file. Config: `data_path` + `dataset_config` (cache_dir, session_ids, brain_areas, quality, windowing).
-2. **Experiment pipeline** (run many times): `experiments/multi_session/multi_session.py` — loads that Parquet via `data_path`, splits by session into train/val/test, then trains LeJEPA and distills into an SNN. No session extraction; only the pre-built Parquet is used.
+Extract sessions from the Allen Visual Behavior Neuropixels cache and write a windowed Parquet:
 
-See **[experiments/README.md](experiments/README.md)** for the full two-pipeline overview and config reference.
+```bash
+python -m experiments.data.create_dataset path/to/dataset_config.yaml
+```
 
-- **Entry point (experiment)**: `experiments/multi_session/multi_session.py`
-- **Configs**: `experiments/multi_session/configs/lejepa_lif_visual_cortex.yaml` (template), `experiments/multi_session/configs/experiment_from_dataset.yaml` (experiment-only, points at existing Parquet).
+See [experiments/data/README.md](experiments/data/README.md) for config format and session selection.
 
-The experiment script validates the config, loads the dataset from `data_path`, and defines placeholders for `train_lejepa`, `distill_snn`, `evaluate_model`, and `save_results` (TODO for full implementation). **torch_brain** will be integrated for multi-recording training and data loaders.
+### 2. Run an experiment
 
-### Dependencies
+The primary interface is the interactive notebook:
 
-Install dependencies (CPU or GPU build of PyTorch as appropriate):
+```
+experiments/multi_session/multi_session_runner.ipynb
+```
+
+Or from the command line:
+
+```bash
+python -m experiments.multi_session.multi_session experiments/multi_session/configs/lejepa_visual_cortex.yaml
+```
+
+See [experiments/multi_session/README.md](experiments/multi_session/README.md) for config options and evaluation details.
+
+---
+
+## Evaluation
+
+The model is evaluated on held-out **test sessions** — sessions the encoder has never seen during training. Because the encoder uses per-session unit embedding tables, test sessions require **unit identification** (test-time adaptation of unit embeddings via a short optimization loop) before probing.
+
+Primary metrics:
+- **Linear probe accuracy** on `is_change` (change detection), `image_name` (stimulus identity), and `session_id` — all on held-out sessions after unit identification.
+- **UMAP visualizations** of the latent space colored by each of the above labels.
+
+Training loss is a secondary diagnostic (SSL task convergence), not the primary measure of representation quality.
+
+---
+
+## Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Key libraries include:
-
-- `torch`, `torchvision`, `snntorch`
-- `allensdk` (Visual Behavior Neuropixels project cache)
-- `numpy`, `pandas`, `scikit-learn`, `matplotlib`, `pyyaml`
-- `pyarrow`, `temporaldata`
-
-### Outputs
-
-The single-session experiment writes to `runs/proof_of_concept/run_*`:
-
-- Training and validation loss curves for JEPA.
-- Latent prediction vs target diagnostics.
-- Spike count distributions.
-- C CA similarity and homeostatic penalty traces for SNN distillation.
+Key libraries: `torch`, `snntorch`, `torch_brain`, `allensdk`, `numpy`, `pandas`, `scikit-learn`, `umap-learn`, `pyarrow`, `temporaldata`, `pyyaml`.

@@ -1,18 +1,18 @@
-# Experiments: Dataset pipeline and experiment pipeline
+# Experiments
 
-The multi-session workflow is split into **two pipelines** so you can build datasets once and run many experiments without re-extracting sessions or re-processing raw data.
+The multi-session workflow is split into two pipelines so you can build a dataset once and run many experiments without re-extracting sessions.
 
 ---
 
 ## 1. Dataset pipeline (run once)
 
-**Purpose:** Extract sessions from the Allen cache, preprocess units, and write a single windowed Parquet.
+**Purpose:** Extract sessions from the Allen cache, filter units, and write a single windowed Parquet.
 
 - **Entry point:** [`experiments/data/create_dataset.py`](data/create_dataset.py)
-- **Input:** A YAML config with `data_path` (output Parquet) and `dataset_config` (cache path, session IDs, brain areas, quality, windowing).
-- **Output:** One Parquet at `data_path` with one row per temporal window (session_id, window_id, events_units, events_times_ms, stimulus, behavior, etc.).
+- **Input:** YAML config with `data_path` (output Parquet) and `dataset_config` (cache dir, session IDs, brain areas, quality thresholds, windowing).
+- **Output:** One Parquet at `data_path` — one row per temporal window, with `session_id`, `window_id`, `events_units`, `events_times_ms`, `stimulus`, `behavior`.
 
-You run this whenever you want to **change sessions, regions, or windowing**. The result is a reusable dataset file.
+Re-run only when you want to change sessions, brain areas, or windowing parameters.
 
 **Details:** [experiments/data/README.md](data/README.md)
 
@@ -20,13 +20,11 @@ You run this whenever you want to **change sessions, regions, or windowing**. Th
 
 ## 2. Experiment pipeline (run many times)
 
-**Purpose:** Load the pre-built Parquet, split by session into train/val/test, then train LeJEPA and distill into an SNN.
+**Purpose:** Load the pre-built Parquet, split by session, train LeJEPA, evaluate on held-out sessions, and distill into an SNN.
 
-- **Entry point:** [`experiments/multi_session/multi_session.py`](multi_session/multi_session.py)
-- **Input:** A YAML config with `data_path` pointing to the **existing** Parquet produced by the dataset pipeline, plus data splits, model, and training settings.
-- **No session extraction:** The experiment pipeline does not touch the Allen cache or session IDs; it only reads the Parquet.
-
-You run this for each experiment (e.g. different hyperparameters or random seeds). No need to re-extract or re-create the dataset.
+- **Primary interface:** [`experiments/multi_session/multi_session_runner.ipynb`](multi_session/multi_session_runner.ipynb)
+- **Script entry point:** [`experiments/multi_session/multi_session.py`](multi_session/multi_session.py)
+- **No session extraction:** reads only the Parquet from step 1.
 
 **Details:** [experiments/multi_session/README.md](multi_session/README.md)
 
@@ -36,15 +34,5 @@ You run this for each experiment (e.g. different hyperparameters or random seeds
 
 | Step | Command | Config contains |
 |------|---------|-----------------|
-| **1. Create dataset** | `python -m experiments.data.create_dataset <dataset_config.yaml>` | `data_path`, `dataset_config` (cache_dir, session_ids, brain_areas, quality, windowing) |
-| **2. Run experiment** | `python -m experiments.multi_session.multi_session <experiment_config.yaml>` | `data_path` (path to Parquet from step 1), data splits, model, training |
-
----
-
-## Current integrations
-
-**temporaldata** is actively used in the dataset pipeline to abstract spike-stimulus mapping and precisely extract intervals via IrregularTimeSeries.
-
-## Future integration
-
-- **[torch_brain](https://github.com/neuro-galaxy/torch_brain)** will be integrated for multi-recording training, data loaders, and models (e.g. POYO).
+| **1. Create dataset** | `python -m experiments.data.create_dataset <config.yaml>` | `data_path`, `dataset_config` (cache_dir, session_ids, brain_areas, quality, windowing) |
+| **2. Run experiment** | notebook or `python -m experiments.multi_session.multi_session <config.yaml>` | `data_path` (Parquet from step 1), data splits, model config, training config |
