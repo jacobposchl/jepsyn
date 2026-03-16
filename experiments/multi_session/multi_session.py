@@ -22,9 +22,7 @@ from jepsyn.utils import (
     apply_unit_dropout,
     create_context_mask,
     evaluate_model,
-    identify_units,
     load_and_prepare_data,
-    run_linear_probe,
     save_results,
     update_ema,
     verify_config,
@@ -529,24 +527,19 @@ def main(config_path: Path) -> None:
     print(f"{stage_name} training complete")
 
     print("\n" + "=" * 60)
-    print("Unit Identification (adapting test-session unit embeddings)")
-    identify_units(jepa_model, test_data, test_session_ids, config)
-
-    print("\n" + "=" * 60)
     print(f"Evaluating {stage_name} on Test Set")
     _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
-    jepa_test_metrics = evaluate_model(
-        jepa_model, test_data, stage=stage_name, mask_ratio=_mask_ratio
+    jepa_test_metrics, probe_results = evaluate_model(
+        jepa_model, test_data,
+        stage=stage_name,
+        mask_ratio=_mask_ratio,
+        test_session_ids=test_session_ids,
+        config=config,
     )
     save_results(
         stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config
     )
     print(f"{stage_name} evaluation complete")
-
-    print("\n" + "=" * 60)
-    print(f"Running Linear Probes ({stage_name})")
-    run_linear_probe(jepa_model, test_data, stage=stage_name)
-    print("Linear probing complete")
 
     print("\n" + "=" * 60)
     print("Distilling into Spiking Neural Network")
@@ -563,7 +556,7 @@ def main(config_path: Path) -> None:
 
         print("\n" + "=" * 60)
         print("Evaluating Distilled SNN on Test Set")
-        snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
+        snn_test_metrics, _ = evaluate_model(snn_model, test_data, stage="SNN", teacher_model=jepa_model)
         save_results(
             stage="SNN", phase="test", metrics=snn_test_metrics, config=config
         )

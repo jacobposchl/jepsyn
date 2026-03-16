@@ -43,6 +43,46 @@ def plot_umap_by_session(
     return fig, embeddings2d
 
 
+def plot_umap_by_image(
+    embeddings2d: np.ndarray,
+    image_labels: np.ndarray,
+    stage: str,
+) -> plt.Figure:
+    """
+    2-D UMAP scatter coloured by image identity.
+
+    Reuses pre-computed 2D coordinates from plot_umap_by_session so UMAP
+    is only fitted once.
+
+    Args:
+        embeddings2d: [N, 2] float array from a prior UMAP fit (already filtered
+                      to valid-image rows by the caller).
+        image_labels: [N] array of image name strings.
+        stage:        Experiment stage label for the title.
+
+    Returns:
+        Matplotlib figure.
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    le = LabelEncoder()
+    encoded = le.fit_transform(image_labels)
+    n_classes = len(le.classes_)
+    cmap = "tab20" if n_classes <= 20 else "viridis"
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(
+        embeddings2d[:, 0], embeddings2d[:, 1],
+        c=encoded, cmap=cmap, alpha=0.5, s=10,
+    )
+    plt.colorbar(scatter, ax=ax, label=f"Image identity ({n_classes} images)")
+    ax.set_title(f"{stage} - Latent Space by Image Identity (UMAP)")
+    ax.set_xlabel("DIM 1")
+    ax.set_ylabel("DIM 2")
+    plt.tight_layout()
+    return fig
+
+
 def plot_umap_by_change(
     embeddings2d: np.ndarray,
     all_change: np.ndarray,
