@@ -20,7 +20,7 @@ def save_results(
     Save metrics to CSV and generate phase-appropriate plots.
 
     Args:
-        stage:   Experiment stage ("LeJEPA", "VICReg", "MAE", "SNN").
+        stage:   Experiment stage ("LeJEPA", "VICReg", "LeJEPA-NoReg", "SNN").
         phase:   One of "training", "test", "distillation".
         metrics: DataFrame of per-epoch or per-batch metrics.
         config:  Validated config dict; must contain results_out_path.

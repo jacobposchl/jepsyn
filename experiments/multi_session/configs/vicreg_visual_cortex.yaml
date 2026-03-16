@@ -55,6 +55,6 @@ training_config:
   vic_sim: 25.0         # weight for invariance (prediction) loss
   vic_std: 25.0         # weight for variance loss (keeps std > 1 per dim)
   vic_cov: 1.0          # weight for covariance loss (decorrelates dimensions)
-  unit_dropout: 0.1     # fraction of units to drop per training step (POYO augmentation)
+  unit_dropout: 0.4     # fraction of units to drop per training step (POYO augmentation)
   unit_id_steps: 200    # steps for test-session unit identification
   unit_id_lr: 1.0e-4    # learning rate for unit identification

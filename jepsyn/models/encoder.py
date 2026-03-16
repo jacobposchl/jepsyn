@@ -5,7 +5,6 @@ Replaces the earlier absolute-time-embedding design with:
     - RoPE (Rotary Position Embeddings) in all attention layers via torch_brain
     - Latent timestamps spread uniformly over the window
     - Per-session unit embedding tables (unchanged from before)
-    - Session embedding injected into latent initialization
     - Optional [START]/[END] delimiter tokens per unit per window
 
 Architecture:
@@ -74,7 +73,6 @@ class PerceiverEncoder(nn.Module):
         - Per-session unit embedding tables (session-specific vocabulary)
         - RoPE temporal encoding in cross- and self-attention (no additive time embed)
         - [START]/[END] delimiter tokens make every registered unit visible each window
-        - Session embedding shifts the latent initialization per session
 
     Note on LayerNorm:
         RotaryCrossAttention and RotarySelfAttention both apply internal pre-LayerNorm
@@ -133,12 +131,6 @@ class PerceiverEncoder(nn.Module):
             str(sid): nn.Embedding(len(unit_map) + 1, d_model, padding_idx=0)
             for sid, unit_map in session_unit_maps.items()
         })
-
-        # Session embedding table: one row per session (all sessions pre-allocated,
-        # including test sessions — their rows start random and are adapted via identify_units).
-        all_sids = sorted(session_unit_maps.keys())
-        self.session_id_to_idx: Dict[int, int] = {sid: i for i, sid in enumerate(all_sids)}
-        self.session_embed = nn.Embedding(len(all_sids), d_model)
 
         # Delimiter embedding: [0 = START, 1 = END]
         if use_delimiter_tokens:
@@ -306,12 +298,8 @@ class PerceiverEncoder(nn.Module):
         latent_pos_cross = self.rope_cross(latent_ts)                            # [B, L, dim_head_cross]
         latent_pos_self  = self.rope_self(latent_ts)                             # [B, L, dim_head_self]
 
-        # 4. Latent initialization: shared learned latents + session-specific offset.
-        sess_idx = torch.tensor(
-            [self.session_id_to_idx[s.item()] for s in session_ids],
-            dtype=torch.long, device=session_ids.device,
-        )
-        z0 = self.latents[None].expand(B, -1, -1) + self.session_embed(sess_idx).unsqueeze(1)
+        # 4. Latent initialization: shared learned latents (session-agnostic).
+        z0 = self.latents[None].expand(B, -1, -1)
 
         # 5. Cross-attention: latents attend over spike/delimiter tokens.
         # RotaryCrossAttention: context_mask uses True=attend convention (same as attn_mask).

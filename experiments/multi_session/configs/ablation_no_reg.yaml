@@ -50,6 +50,6 @@ training_config:
   mask_ratio: 0.5
   reg_type: "no_reg"
   lambd: 0.0
-  unit_dropout: 0.1
+  unit_dropout: 0.4
   unit_id_steps: 200
   unit_id_lr: 1.0e-4

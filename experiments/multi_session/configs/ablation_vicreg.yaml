@@ -1,16 +1,23 @@
-# experiments/multi_session/configs/config_vicreg.yaml
+# experiments/multi_session/configs/ablation_vicreg.yaml
+#
+# VICReg ablation: identical to lejepa_visual_cortex.yaml in every way except
+# the regularizer (reg_type: vicreg + vic_* weights).
+# All paths are relative to the repo root (snn-jepa/).
 
 data_path: ../../../datasets/vis_all_animals_dataset.parquet
 results_out_path: ../../../results/ablation_vicreg
 plots_out_path: ../../../plots/ablation_vicreg
 
+# Data split sizes (by session_id)
 data:
   train_split: 0.7
   test_split: 0.15
   val_split: 0.15
   random_state: 42
 
+# Model config (identical to lejepa_visual_cortex.yaml)
 model_config:
+  # --- Encoder ---
   encoder_type: perceiver
   d_model: 256
   n_latents: 64
@@ -20,16 +27,19 @@ model_config:
   n_self_attn_heads: 8
   dim_feedforward: 1024
   dropout: 0.1
-  # POYO specific settings
+
+  # --- POYO RoPE & token settings ---
   rope_t_min: 1.0e-3
   rope_t_max: 4.0
   use_delimiter_tokens: true
-  # Standard Predictor
+
+  # --- Predictor (intentionally narrower than encoder) ---
   predictor_type: transformer
   predictor_n_layers: 2
   predictor_n_heads: 4
   predictor_dim_feedforward: 512
 
+# Training config (identical to lejepa_visual_cortex.yaml except reg_type and vic_* params)
 training_config:
   epochs: 100
   batch_size: 32
@@ -37,11 +47,10 @@ training_config:
   weight_decay: 0.05
   ema_momentum: 0.996
   mask_ratio: 0.5
-  # --- VICReg Ablation Parameters ---
   reg_type: "vicreg"
-  vic_sim: 25.0 # Invariance weight
-  vic_std: 25.0 # Variance weight
-  vic_cov: 1.0 # Covariance weight
-  unit_dropout: 0.1
+  vic_sim: 25.0         # weight for invariance (prediction) loss
+  vic_std: 25.0         # weight for variance loss (keeps std > 1 per dim)
+  vic_cov: 1.0          # weight for covariance loss (decorrelates dimensions)
+  unit_dropout: 0.4
   unit_id_steps: 200
   unit_id_lr: 1.0e-4

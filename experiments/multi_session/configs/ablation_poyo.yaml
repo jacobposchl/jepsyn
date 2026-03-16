@@ -1,6 +1,6 @@
 # experiments/multi_session/configs/config_poyo_baseline.yaml
 
-data_path: ../../../datasets/visp_visl_windows.parquet
+data_path: ../../../datasets/vis_all_animals_dataset.parquet
 results_out_path: ../../../results/ablation_poyo
 plots_out_path: ../../../plots/ablation_poyo
 
@@ -40,6 +40,6 @@ training_config:
   mask_ratio: 0.75 # Higher masking is standard for POYO-style SSL
   lambd: 0.01 # Minimize regularization impact to focus on reconstruction
   num_slices: 256
-  unit_dropout: 0.1
+  unit_dropout: 0.4
   unit_id_steps: 200
   unit_id_lr: 1.0e-4
