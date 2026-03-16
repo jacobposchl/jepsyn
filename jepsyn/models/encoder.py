@@ -19,7 +19,6 @@ from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
-from einops import repeat
 from torch_brain.nn import RotaryCrossAttention, RotarySelfAttention
 
 
@@ -44,7 +43,7 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, timestamps):
         angles = torch.einsum("..., f -> ... f", timestamps, self.omega)
-        angles = repeat(angles, "... n -> ... (n r)", r=2)
+        angles = angles.repeat_interleave(2, dim=-1)
         return angles
 
 
